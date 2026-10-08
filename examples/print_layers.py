@@ -11,8 +11,8 @@ from oamc.integrations.ansys.parser import APDLParser
 from oamc.logging import enable_logging
 from oamc.post import Viewer
 
-from SlicedPiece import SlicedPiece
-from SlicedMold import SlicedMold
+from slicer import SlicedPiece
+from slicer import SlicedMold
 
 DIR = Path(__file__).parent.resolve()
 

@@ -8,7 +8,7 @@ from vtkmodules.vtkCommonCore import vtkIdList, vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkStaticCellLocator
 
 from oamc.core import CompositeModel
-from SlicedObject import SlicedObject
+from slicer.SlicedObject import SlicedObject
 
 
 class _RayCaster:
