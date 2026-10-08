@@ -392,7 +392,8 @@ class SlicedPiece(SlicedObject):
         contour_width: float = 3.0,
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
-        contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
+        spacing: float = 0.5,
+        contour_isovalues=None,
         merge_tolerance: float = 0.1,
     ):
         """
@@ -400,7 +401,18 @@ class SlicedPiece(SlicedObject):
         infill lines (cut from the inner offset zone by the fiber-aligned
         slicing planes) plus distance-to-boundary contour shells, stitched
         together as in build_full_printing_path.
+
+        `spacing` is the line-to-line deposition width, common to the infill
+        (distance between the slicing planes) and to the contours (isovalues
+        spaced by `spacing` inside `contour_width`), as on a real print.
+        When `contour_isovalues` is None, the shell isovalues are derived
+        as the multiples of `spacing` strictly inside `contour_width`.
         """
+        if contour_isovalues is None:
+            contour_isovalues = tuple(
+                s for s in spacing * np.arange(1, int(np.ceil(contour_width / spacing)) + 1)
+                if s < contour_width
+            )
         # Merge coincident points first: an isosurface extracted from the
         # model's grid can have duplicate points along its boundary, which
         # confuses feature-edge (boundary) detection and makes
@@ -409,7 +421,7 @@ class SlicedPiece(SlicedObject):
         # (normals, distance field), since the point indexing changes.
         self.surface = self.surface.merge_points(tolerance=merge_tolerance)
 
-        planes = self.generate_slicing_planes(i_surface=i_surface)
+        planes = self.generate_slicing_planes(i_surface=i_surface, spacing=spacing)
         inner_zone = self.build_offset_surface(contour_width, invert=False)
 
         # Single-pass cut of the inner zone with all the planes
@@ -435,7 +447,8 @@ class SlicedPiece(SlicedObject):
         contour_width: float = 3.0,
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
-        contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
+        spacing: float = 0.5,
+        contour_isovalues=None,
         include_orientation: bool = False,
         approach_sign: float = -1.0,
         simplify_tolerance: float | None = None,
@@ -458,6 +471,7 @@ class SlicedPiece(SlicedObject):
                 contour_width=contour_width,
                 approach_distance=approach_distance,
                 max_connection_length=max_connection_length,
+                spacing=spacing,
                 contour_isovalues=contour_isovalues,
             )
 
