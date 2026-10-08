@@ -70,6 +70,8 @@ class SlicedMold(SlicedObject):
         contour_shells: list[np.ndarray] | None = None,
         infill_x: list[np.ndarray] | None = None,
         infill_y: list[np.ndarray] | None = None,
+        infill_levels_x: np.ndarray | None = None,
+        infill_levels_y: np.ndarray | None = None,
     ):
         super().__init__(surface)
         self.part_surface = part_surface  # goes through the setter below
@@ -78,6 +80,10 @@ class SlicedMold(SlicedObject):
         self.contour_shells = contour_shells or []
         self.infill_x = infill_x or []
         self.infill_y = infill_y or []
+        # Fixed infill plane positions, computed once from layer zero and
+        # shared by every layer so the infill paths stack vertically.
+        self.infill_levels_x = infill_levels_x
+        self.infill_levels_y = infill_levels_y
 
     # ------------------------------------------------------------------
     # Local normal override
@@ -901,6 +907,20 @@ class SlicedMold(SlicedObject):
             1
         )
 
+        # Infill planes, generated ONCE from layer zero (the footprint of
+        # the shadow volume on the printing plane) and reused for every
+        # layer, so the infill paths stack exactly on top of each other
+        # instead of shifting with the part's geometry.
+        base_layer = shadow.contour(isosurfaces=[float(q_values[0])], scalars="q")
+        if base_layer.n_points > 0:
+            base_bounds = base_layer.bounds
+        else:
+            base_bounds = shadow.bounds
+        infill_levels_x = np.arange(base_bounds[0], base_bounds[1] + spacing, spacing)
+        infill_levels_y = np.arange(base_bounds[2], base_bounds[3] + spacing, spacing)
+        print(f"Fixed infill planes: {len(infill_levels_x)} normal to X, "
+              f"{len(infill_levels_y)} normal to Y (from layer q={q_values[0]})")
+
         shell_values = [(i + 0.5) * nozzle_diameter for i in range(n_contour_shells)]
         inner_offset = n_contour_shells * nozzle_diameter
 
@@ -960,15 +980,10 @@ class SlicedMold(SlicedObject):
             infill_y = []
 
             if inner_zone.n_points > 0:
-                bounds = inner_zone.bounds
-
-                # Planes normal to X, then normal to Y (one pass each)
-                infill_x = cls._cut_axis_planes(
-                    inner_zone, 0, np.arange(bounds[0], bounds[1] + spacing, spacing)
-                )
-                infill_y = cls._cut_axis_planes(
-                    inner_zone, 1, np.arange(bounds[2], bounds[3] + spacing, spacing)
-                )
+                # Same fixed planes for every layer (see infill_levels_*
+                # above): one pass per direction.
+                infill_x = cls._cut_axis_planes(inner_zone, 0, infill_levels_x)
+                infill_y = cls._cut_axis_planes(inner_zone, 1, infill_levels_y)
 
             print(f"  -> {len(contour_shells)} shells, "
                   f"{len(infill_x)} infill_x, {len(infill_y)} infill_y")
@@ -981,6 +996,8 @@ class SlicedMold(SlicedObject):
                 contour_shells=contour_shells,
                 infill_x=infill_x,
                 infill_y=infill_y,
+                infill_levels_x=infill_levels_x,
+                infill_levels_y=infill_levels_y,
             )
             layer._part_normals_cache = part_normals  # shared, read-only
             layers.append(layer)
