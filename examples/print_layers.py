@@ -115,7 +115,8 @@ def main() -> None:
             i_surface=i,
             contour_width=3.0,
             approach_distance=1.0,
-            max_connection_length=4 * 0.5,
+            nozzle_diameter=2.0,
+            max_connection_length=4 * 2.0,
         )
 
         print(f"Layer {i}: full path = {len(path_segments)} segments, {len(Lcmd)} commands")
@@ -134,7 +135,8 @@ def main() -> None:
         DIR / "trajectories" / "piece_path.txt",
         contour_width=3.0,
         approach_distance=1.0,
-        max_connection_length=4 * 0.5,
+        nozzle_diameter=2.0,
+        max_connection_length=4 * 2.0,
         include_orientation=True,
         simplify_tolerance=0.5, #mm
     )

@@ -392,7 +392,8 @@ class SlicedPiece(SlicedObject):
         contour_width: float = 3.0,
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
-        contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
+        nozzle_diameter: float = 0.70,
+        contour_isovalues=None,
         merge_tolerance: float = 0.1,
     ):
         """
@@ -400,7 +401,20 @@ class SlicedPiece(SlicedObject):
         infill lines (cut from the inner offset zone by the fiber-aligned
         slicing planes) plus distance-to-boundary contour shells, stitched
         together as in build_full_printing_path.
+
+        `nozzle_diameter` is the deposited line width, common to the infill
+        (distance between the slicing planes) and to the contours, as on a
+        real print. Each contour shell lies at the center of its deposited
+        bead, i.e. at the isovalues (n + 0.5) * nozzle_diameter, for every n
+        such that the bead stays inside `contour_width`. When
+        `contour_isovalues` is None, the shell isovalues are derived this way.
         """
+        if contour_isovalues is None:
+            contour_isovalues = tuple(
+                (i + 0.5) * nozzle_diameter
+                for i in range(int(np.ceil(contour_width / nozzle_diameter)))
+                if (i + 1) * nozzle_diameter <= contour_width
+            )
         # Merge coincident points first: an isosurface extracted from the
         # model's grid can have duplicate points along its boundary, which
         # confuses feature-edge (boundary) detection and makes
@@ -409,7 +423,7 @@ class SlicedPiece(SlicedObject):
         # (normals, distance field), since the point indexing changes.
         self.surface = self.surface.merge_points(tolerance=merge_tolerance)
 
-        planes = self.generate_slicing_planes(i_surface=i_surface)
+        planes = self.generate_slicing_planes(i_surface=i_surface, spacing=nozzle_diameter)
         inner_zone = self.build_offset_surface(contour_width, invert=False)
 
         # Single-pass cut of the inner zone with all the planes
@@ -435,7 +449,8 @@ class SlicedPiece(SlicedObject):
         contour_width: float = 3.0,
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
-        contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
+        nozzle_diameter: float = 0.70,
+        contour_isovalues=None,
         include_orientation: bool = False,
         approach_sign: float = -1.0,
         simplify_tolerance: float | None = None,
@@ -458,6 +473,7 @@ class SlicedPiece(SlicedObject):
                 contour_width=contour_width,
                 approach_distance=approach_distance,
                 max_connection_length=max_connection_length,
+                nozzle_diameter=nozzle_diameter,
                 contour_isovalues=contour_isovalues,
             )
 
