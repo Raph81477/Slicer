@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation as Rot
 
 from oamc.core import CompositeModel
 from oamc.utils.vtk import compute_level_surface
-from slicer.SlicedObject import SlicedObject
+from slicer.core.SlicedObject import SlicedObject
 
 
 class SlicedPiece(SlicedObject):
