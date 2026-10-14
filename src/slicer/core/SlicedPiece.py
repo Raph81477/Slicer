@@ -310,25 +310,7 @@ class SlicedPiece(SlicedObject):
         grid = model.get_grid(u_scaling_factor=0)
         grid.point_data["q"] = model.q
 
-        # Deposit surfaces: layer 0 is printed ON the mold (q = 0.5, i.e.
-        # zero distance), and layer n >= 1 is printed on top of layer n-1,
-        # at the same height as the fibers of oamc's layer_n (integer q
-        # levels, see compute_int_levels): fiber layer_1 sits at q = 1, on
-        # top of plastic layer 0. Fibers and deposit surfaces coincide
-        # geometrically but are separated in time (fibers are deposited
-        # between two consecutive plastic layers, fiber height assumed
-        # negligible), so no material overlap occurs.
-        q_values = np.concatenate(
-            ([0.5], np.arange(1.0, int(max_q_value)))
-        )
-
-        # A level set extracted exactly at the field minimum (the mold
-        # contact nodes have q = 0.5) yields a degenerate surface with
-        # only vertex/line cells, which breaks compute_normals. Nudge any
-        # level that coincides with the minimum slightly above it.
-        q_min = float(np.min(model.q))
-        eps = 1e-3
-        q_values[q_values <= q_min + eps] = q_min + eps
+        q_values = np.arange(1.0, int(max_q_value))  # Layers 1 to N
         return grid, q_values
 
     @staticmethod
