@@ -440,6 +440,13 @@ class SlicedMold(SlicedObject):
         candidate_nodes, inverse = np.unique(candidate_faces.ravel(), return_inverse=True)
         face_node_idx = inverse.reshape(-1, 3)  # triangles indexing top_pts
 
+        if len(candidate_nodes) == 0:
+            raise ValueError(
+                "get_shadow_volume_vertical: no downward-facing face found on "
+                "the model's outer surface. Check that the model is correctly "
+                "rotated (SlicedMold.rotate_model) and lifted "
+                "(SlicedMold.lift_model) above the printing plane."
+            )
         print(f"Candidate nodes: {len(candidate_nodes)}")
 
         # "Upward-facing" surface used for the intersection tests
