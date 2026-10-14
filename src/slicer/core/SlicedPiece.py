@@ -310,7 +310,12 @@ class SlicedPiece(SlicedObject):
         grid = model.get_grid(u_scaling_factor=0)
         grid.point_data["q"] = model.q
 
-        q_values = np.arange(1.0, int(max_q_value))  # Layers 1 to N
+        # Plastic layers sit on half-integer q levels (n + 0.5), so that
+        # fiber paths (saved by oamc at integer q levels, layer_1 = q = 1)
+        # end up between two consecutive plastic layers: plastic layer 0
+        # at q = 0.5 (on the mold), fibers layer_1 at q = 1, plastic layer
+        # 1 at q = 1.5, and so on. Fiber height is assumed negligible.
+        q_values = np.arange(0.5, int(max_q_value), dtype=float)
         return grid, q_values
 
     @staticmethod
