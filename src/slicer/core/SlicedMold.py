@@ -139,8 +139,8 @@ class SlicedMold(SlicedObject):
     def rotate_model(model: CompositeModel, rot_mat: np.ndarray) -> None:
         """Rotate the model's mesh nodes in place by the given rotation matrix."""
         model.mesh.nodes[:] = (rot_mat @ model.mesh.nodes.T).T
-        model.mold.nodes[:] = (rot_mat @ model.mold.nodes.T).T
-        object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
+        #model.mold.nodes[:] = (rot_mat @ model.mold.nodes.T).T
+        #object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
 
         new_polydata = model.mold.polydata.copy()
         new_polydata.points = (rot_mat @ model.mold.polydata.points.T).T
@@ -150,8 +150,8 @@ class SlicedMold(SlicedObject):
     def lift_model(model: CompositeModel, offset: float) -> None:
         """Translate the model's mesh nodes along Z by `offset`, in place."""
         model.mesh.nodes[:, 2] += offset
-        model.mold.nodes[:, 2] += offset
-        object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
+        #model.mold.nodes[:, 2] += offset
+        #object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
 
         new_polydata = model.mold.polydata.copy()
         new_polydata.points = model.mold.polydata.points.copy()

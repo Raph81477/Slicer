@@ -84,7 +84,7 @@ def build_model() -> CompositeModel:
         dbc=model.dbc,
         nbc=model.nbc,
         fiber_diameter=NOZZLE_DIAMETER,
-        layer_height=0.35,
+        layer_height=1.0,
     )
 
     rot_mat = SlicedPiece.get_rotation_matrix(model)
