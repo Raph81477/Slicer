@@ -87,9 +87,10 @@ def build_model() -> CompositeModel:
         layer_height=0.35,
     )
 
-    SlicedMold.rotate_model(model, SlicedPiece.get_rotation_matrix(model))
+    rot_mat = SlicedPiece.get_rotation_matrix(model)
+    SlicedMold.rotate_model(model, rot_mat)
     SlicedMold.lift_model(model, offset=LIFT_OFFSET)
-    return model
+    return model, rot_mat
 
 
 def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
@@ -134,14 +135,36 @@ def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
         )
 
 
+def transform_fiber_paths(
+    fiber_paths: dict[int, np.ndarray],
+    rot_mat: np.ndarray,
+    lift_offset: float = 0.0,
+) -> dict[int, np.ndarray]:
+    """Apply to raw (unrotated) fiber paths the same rigid transform as the
+    model: rotation by rot_mat then translation along Z, matching
+    SlicedMold.rotate_model and SlicedMold.lift_model."""
+    transformed = {}
+    for key, path in fiber_paths.items():
+        points = (rot_mat @ path.T).T
+        if lift_offset:
+            points = points.copy()
+            points[:, 2] += lift_offset
+        transformed[key] = points
+    return transformed
+
+
 def add_printing_layers(
     plotter: pv.Plotter,
     model: CompositeModel,
+    rot_mat: np.ndarray,
     n_layers: int,
     vis_layer_height: float = 2.0,
 ) -> None:
     """Part layer surfaces and printing paths, as in print_layers.py."""
     fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
+    fiber_paths = transform_fiber_paths(
+        fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
+    )
     pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
 
     n_layers = min(n_layers, len(pieces))
@@ -183,6 +206,7 @@ def add_printing_layers(
 
 def add_fibers(
     plotter: pv.Plotter,
+    rot_mat: np.ndarray,
     fiber_root: Path | None = None,
 ) -> None:
     """Fiber paths saved in the fibers directory, one color per layer."""
@@ -198,6 +222,9 @@ def add_fibers(
         color = FIBER_COLORS[i % len(FIBER_COLORS)]
 
         fiber_paths = SlicedPiece.load_fiber_paths(fiber_root.parent, layer=layer)
+        fiber_paths = transform_fiber_paths(
+            fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
+        )
 
         for fiber_path in fiber_paths.values():
             plotter.add_mesh(
@@ -232,15 +259,15 @@ def main() -> None:
 
     args = parse_args()
 
-    model = build_model()
+    model, rot_mat = build_model()
 
     plotter = pv.Plotter(title="Whole print: mold + layers + fibers")
 
     if not args.no_mold:
         add_mold(plotter, model)
 
-    add_printing_layers(plotter, model, n_layers=args.layers)
-    add_fibers(plotter)
+    add_printing_layers(plotter, model, rot_mat, n_layers=args.layers)
+    add_fibers(plotter, rot_mat)
 
     plotter.add_legend()
     plotter.show()
