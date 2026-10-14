@@ -316,6 +316,14 @@ class SlicedPiece(SlicedObject):
         # at q = 0.5 (on the mold), fibers layer_1 at q = 1, plastic layer
         # 1 at q = 1.5, and so on. Fiber height is assumed negligible.
         q_values = np.arange(0.5, int(max_q_value), dtype=float)
+
+        # A level set extracted exactly at the field minimum (the mold
+        # contact nodes have q = 0.5) yields a degenerate surface with
+        # only vertex/line cells, which breaks compute_normals. Nudge any
+        # level that coincides with the minimum slightly above it.
+        q_min = float(np.min(model.q))
+        eps = 1e-3
+        q_values[q_values <= q_min + eps] = q_min + eps
         return grid, q_values
 
     @staticmethod
