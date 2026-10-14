@@ -320,11 +320,11 @@ def parse_args() -> argparse.Namespace:
         help="Number of part printing layers to display (default: 2).",
     )
     parser.add_argument(
-        "--export-fibers",
+        "--no-export-fibers",
         action="store_true",
         help=(
-            "Export the rotated and lifted fiber paths to CSV files "
-            "(same format as the oamc export)."
+            "Skip the export of the rotated and lifted fiber paths to "
+            "CSV files (exported by default)."
         ),
     )
     parser.add_argument(
@@ -347,7 +347,7 @@ def main() -> None:
 
     model, rot_mat = build_model()
 
-    if args.export_fibers:
+    if not args.no_export_fibers:
         export_fibers(rot_mat, args.fibers_out)
 
     plotter = pv.Plotter(title="Whole print: mold + layers + fibers")
