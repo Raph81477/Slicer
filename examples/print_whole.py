@@ -204,6 +204,61 @@ def add_printing_layers(
             )
 
 
+def load_transformed_fiber_paths(
+    rot_mat: np.ndarray,
+    fiber_root: Path | None = None,
+) -> dict[int, dict[int, np.ndarray]]:
+    """Load every fiber layer from the fibers directory and apply the same
+    rigid transform as the model (rotation then lift)."""
+    fiber_root = fiber_root or DIR / "fibers"
+
+    layer_dirs = sorted(
+        (d for d in fiber_root.glob("layer_*") if d.is_dir()),
+        key=lambda d: int(d.name.split("_")[-1]),
+    )
+
+    layers = {}
+    for layer_dir in layer_dirs:
+        layer = int(layer_dir.name.split("_")[-1])
+        fiber_paths = SlicedPiece.load_fiber_paths(fiber_root.parent, layer=layer)
+        layers[layer] = transform_fiber_paths(
+            fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
+        )
+    return layers
+
+
+def export_fibers(
+    rot_mat: np.ndarray,
+    out_directory: Path,
+    fiber_root: Path | None = None,
+) -> list[Path]:
+    """Export the (rotated + lifted) fiber paths to CSV files, in the same
+    format as the oamc export (x, y, z, nx, ny, nz)."""
+    layers = load_transformed_fiber_paths(rot_mat, fiber_root)
+
+    written = []
+    for layer, fiber_paths in layers.items():
+        normals = {
+            i: (rot_mat @ np.column_stack([
+                np.zeros(len(path)),
+                np.zeros(len(path)),
+                -np.ones(len(path)),
+            ]).T).T
+            for i, path in fiber_paths.items()
+        }
+        written.extend(
+            SlicedPiece.save_fiber_paths(
+                fiber_paths,
+                out_directory,
+                layer=layer,
+                normals=normals,
+            )
+        )
+
+    print(f"Exported {len(written)} fiber files to {out_directory / 'fibers'}")
+    return written
+
+
 def add_fibers(
     plotter: pv.Plotter,
     rot_mat: np.ndarray,
@@ -211,6 +266,20 @@ def add_fibers(
 ) -> None:
     """Fiber paths saved in the fibers directory, one color per layer."""
     fiber_root = fiber_root or DIR / "fibers"
+
+    layer_dirs = sorted(
+        (d for d in fiber_root.glob("layer_*") if d.is_dir()),
+        key=lambda d: int(d.name.split("_")[-1]),
+    )
+
+    for i, layer_dir in enumerate(layer_dirs):
+        layer = int(layer_dir.name.split("_")[-1])
+        color = FIBER_COLORS[i % len(FIBER_COLORS)]
+
+        fiber_paths = SlicedPiece.load_fiber_paths(fiber_root.parent, layer=layer)
+        fiber_paths = transform_fiber_paths(
+            fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
+        )
 
     layer_dirs = sorted(
         (d for d in fiber_root.glob("layer_*") if d.is_dir()),
@@ -250,6 +319,23 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Number of part printing layers to display (default: 2).",
     )
+    parser.add_argument(
+        "--export-fibers",
+        action="store_true",
+        help=(
+            "Export the rotated and lifted fiber paths to CSV files "
+            "(same format as the oamc export)."
+        ),
+    )
+    parser.add_argument(
+        "--fibers-out",
+        type=Path,
+        default=DIR / "fibers_transformed",
+        help=(
+            "Output directory for --export-fibers "
+            f"(default: {DIR / 'fibers_transformed'})."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -260,6 +346,9 @@ def main() -> None:
     args = parse_args()
 
     model, rot_mat = build_model()
+
+    if args.export_fibers:
+        export_fibers(rot_mat, args.fibers_out)
 
     plotter = pv.Plotter(title="Whole print: mold + layers + fibers")
 
