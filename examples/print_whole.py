@@ -259,6 +259,32 @@ def export_fibers(
     return written
 
 
+def export_plastic(
+    model: CompositeModel,
+    out_directory: Path,
+    n_layers: int | None = None,
+    simplify_tolerance: float | None = None,
+) -> None:
+    """Export the plastic printing paths of every layer to CSV files, one
+    subdirectory per layer (layer_i/segment_j.csv), in the same (already
+    rotated and lifted) frame as the transformed fibers. The model itself
+    has already been rotated and lifted in place by build_model."""
+    fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
+    pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
+
+    if n_layers is not None:
+        pieces = pieces[:n_layers]
+
+    SlicedPiece.export_layers_to_csv(
+        pieces,
+        out_directory,
+        contour_width=3.0,
+        approach_distance=1.0,
+        max_connection_length=4 * 0.5,
+        simplify_tolerance=simplify_tolerance,
+    )
+
+
 def add_fibers(
     plotter: pv.Plotter,
     rot_mat: np.ndarray,
@@ -336,6 +362,40 @@ def parse_args() -> argparse.Namespace:
             f"(default: {DIR / 'fibers_transformed'})."
         ),
     )
+    parser.add_argument(
+        "--no-export-plastic",
+        action="store_true",
+        help=(
+            "Skip the export of the plastic printing paths to "
+            "CSV files (exported by default)."
+        ),
+    )
+    parser.add_argument(
+        "--plastic-out",
+        type=Path,
+        default=DIR / "trajectories",
+        help=(
+            "Output directory for the plastic paths, one subdirectory "
+            "per layer (default: {DIR / 'trajectories'})."
+        ),
+    )
+    parser.add_argument(
+        "--export-plastic-layers",
+        type=int,
+        default=None,
+        help=(
+            "Number of plastic layers to export (default: all)."
+        ),
+    )
+    parser.add_argument(
+        "--simplify-tolerance",
+        type=float,
+        default=0.5,
+        help=(
+            "Ramer-Douglas-Peucker tolerance (mm) applied to the plastic "
+            "paths before export (default: 0.5, 0 disables)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -349,6 +409,14 @@ def main() -> None:
 
     if not args.no_export_fibers:
         export_fibers(rot_mat, args.fibers_out)
+
+    if not args.no_export_plastic:
+        export_plastic(
+            model,
+            args.plastic_out,
+            n_layers=args.export_plastic_layers,
+            simplify_tolerance=args.simplify_tolerance or None,
+        )
 
     plotter = pv.Plotter(title="Whole print: mold + layers + fibers")
 
