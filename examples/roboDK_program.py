@@ -20,7 +20,6 @@ import re
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 # ------------------------- PARAMETERS -------------------------
 # Relative paths: RoboDK copies this script to a temp folder before running
@@ -41,13 +40,18 @@ FRAME_XYZRPY = [800, 0, 0, 0, 0, 0]  # ABSOLUTE in the station -> TO ADJUST
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
-VERTICAL_SIGN = -1                  # plastic: tool Z towards -Z part (nozzle down)
+VERTICAL_TOOL = True           # True: ignore the CSV orientation columns, the nozzle stays
+                               # normal to the z=0 plane (mold); False: orientation from the file
+VERTICAL_SIGN = -1             # (vertical mode) -1: TCP Z towards -Z of the part frame (nozzle
+                               # down); +1: up
+TOOL_AXIS = "w"                # file axis that gives the nozzle axis: "u", "v" or "w"
+                               # (column of the exported rotation, i.e. TCP X, Y or Z)
+TOOL_SIGN = -1                 # +1/-1: direction of the axis (the TCP Z points towards the part)
+X_MODE = "fixed"               # "fixed": constant TCP X (no useless rotation about the nozzle)
+                               # "tangent": TCP X follows X_HINT from the file (rotates a lot!)
+FIXED_X = [0, 1, 0]            # reference vector (part frame) for "fixed" mode (and vertical)
+X_HINT = "u"                   # file axis used in "tangent" mode (and as fallback)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
-FILE_ORIENTATION_SIGN = -1           # orientations read from the CSV files (piece): flip the
-                                    # exported tool Z axis when it points the wrong way.
-                                    # +1: keep as exported; -1: flip 180 deg about the
-                                    # exported tool X axis (nozzle to the other side).
-FIXED_X = [0, 1, 0]                 # reference vector for the tool's X axis
 
 # --- Plastic ---
 MIN_STEP = 3.0                      # mm: minimum distance between two kept points
@@ -56,10 +60,6 @@ DETOUR_MAX_ZSPAN = 1.0              # mm: detour heuristic only valid on quasi-f
                                     # beyond this z spread over printed points the layer is
                                     # non-planar and detection is disabled
 MAX_ANGLE = 5.0                     # deg: also keep a point if the orientation rotates more than this
-DETOUR_XY_RADIUS = 1.0              # mm: local detour detection (non-planar layers): a print point
-                                    # passing this close in XY under an already-laid line is a detour
-TRAVEL_XY_RADIUS = 5.0              # mm: local travel lift (non-planar layers): approach/leave
-                                    # points below a print line within this XY radius are raised
 LIFT_TRAVEL = True                  # True: approach/leave points below the print height are
                                     # raised to zref + Z_LIFT
 Z_LIFT = 3.0                        # mm: clearance above the print height for travel moves
@@ -129,44 +129,6 @@ def _layer_zref(P, types, layers):
             z = np.round(P[m][:, 2], 3)
             zref[li] = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
     return zref
-
-
-def relabel_detours_xy(P, types, xy_radius=DETOUR_XY_RADIUS, z_tol=DETOUR_Z_TOL):
-    """Local detour detection for non-planar layers: a curve/connection point
-    passing under an already-laid line (near-coincident in XY, lower in z)
-    is relabeled 'leave': not printed. Replaces the per-layer print-height
-    heuristic, which is meaningless when z varies across a layer."""
-    m = np.isin(types, PRINT_TYPES)
-    idx = np.where(m)[0]
-    detour = np.zeros(len(P), bool)
-    if len(idx) >= 2:
-        tree = cKDTree(P[idx, :2])
-        pairs = tree.query_pairs(xy_radius, output_type="ndarray")
-        if len(pairs):
-            a, b = idx[pairs[:, 0]], idx[pairs[:, 1]]
-            za, zb = P[a, 2], P[b, 2]
-            detour[a[za < zb - z_tol]] = True
-            detour[b[zb < za - z_tol]] = True
-    types[detour] = "leave"
-    return int(detour.sum())
-
-
-def lift_travel_xy(P, types, xy_radius=TRAVEL_XY_RADIUS, z_lift=Z_LIFT, z_tol=DETOUR_Z_TOL):
-    """Local travel lift for non-planar layers: approach/leave points below a
-    nearby print line are raised above it (clearance for travel moves)."""
-    m = np.isin(types, PRINT_TYPES)
-    lifted = 0
-    if m.any():
-        print_pts = P[m]
-        tree = cKDTree(print_pts[:, :2])
-        for i in np.where(np.isin(types, ("approach", "leave")))[0]:
-            nb = tree.query_ball_point(P[i, :2], xy_radius)
-            if nb:
-                z_local = print_pts[nb, 2].max()
-                if P[i, 2] < z_local - z_tol:
-                    P[i, 2] = z_local + z_lift
-                    lifted += 1
-    return lifted
 
 
 def relabel_detours(P, types, layers, z_tol=DETOUR_Z_TOL):
@@ -397,7 +359,6 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
     # than DETOUR_MAX_ZSPAN) a lower z is legitimate, so detect nothing.
     is_print = np.isin(T, PRINT_TYPES)
     layers_arr = np.full(len(P), li)
-    ndet = 0
     if is_print.any():
         z_print = P[is_print][:, 2]
         if z_print.max() - z_print.min() <= DETOUR_MAX_ZSPAN:
@@ -405,14 +366,11 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
             if LIFT_TRAVEL:
                 lift_travel(P, T, layers_arr)
         else:
-            # Non-planar layer: the per-layer print-height heuristic is
-            # meaningless; use local XY detection instead (a point passing
-            # under an already-laid line is a detour).
+            ndet = 0
             print(f"  non-planar layer (z spread {z_print.max() - z_print.min():.1f} mm): "
-                  "local (XY) detour detection")
-            ndet = relabel_detours_xy(P, T)
-            if LIFT_TRAVEL:
-                lift_travel_xy(P, T)
+                  "detour detection disabled")
+    else:
+        ndet = 0
 
     # consecutive exact duplicates
     keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (T[1:] != T[:-1])
@@ -429,22 +387,33 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
 
 
 def plastic_moves(p: PlasticPath, prefix="plastic "):
-    # TCP poses: full orientations exported by the slicer when present,
-    # otherwise vertical Z (nozzle down) + reference X.
-    if p.orientations is not None:
-        T = np.tile(np.eye(4), (len(p.points), 1, 1))
-        R = p.orientations
-        if FILE_ORIENTATION_SIGN < 0:
-            # Flip the tool 180 deg about its own X axis: Z -> -Z, Y -> -Y.
-            # F acts on the world side (left multiplication) so the exported
-            # tool X (direction of travel) is preserved.
-            flip = np.diag([1.0, -1.0, -1.0])
-            R = flip @ R
-        T[:, :3, :3] = R
-        T[:, :3, 3] = p.points
+    """Build the TCP poses. Vertical mode (VERTICAL_TOOL=True): the nozzle
+    stays normal to the z=0 plane of the part frame. Otherwise the pose is
+    rebuilt from the orientation axes exported in the CSV: the nozzle axis
+    is TOOL_SIGN * TOOL_AXIS (u/v/w = TCP X/Y/Z of the export), and the TCP
+    X axis is either fixed (X_MODE="fixed") or follows X_HINT ("tangent").
+    Same logic as the original mold viewer's build_poses."""
+    P = p.points
+    n = len(P)
+    if VERTICAL_TOOL or p.orientations is None:
+        Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (n, 1))
+        T = frames_from_z(P, Z, FIXED_X)
     else:
-        Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (len(p.points), 1))
-        T = frames_from_z(p.points, Z, FIXED_X)
+        R = p.orientations                     # (N, 3, 3), columns = exported TCP X/Y/Z
+        ax = {"u": R[:, :, 0], "v": R[:, :, 1], "w": R[:, :, 2]}
+        Z = TOOL_SIGN * ax[TOOL_AXIS]
+        Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
+        Xh = ax[X_HINT].copy()
+        if X_MODE == "fixed":
+            ref = np.tile(np.array(FIXED_X, float), (n, 1))
+            proj = ref - (ref * Z).sum(1, keepdims=True) * Z
+            ok = np.linalg.norm(proj, axis=1) > 0.1   # else (Z parallel to FIXED_X): tangent
+            Xh[ok] = proj[ok]
+        X = Xh - (Xh * Z).sum(1, keepdims=True) * Z
+        X /= np.linalg.norm(X, axis=1, keepdims=True)
+        Y = np.cross(Z, X)
+        T = np.tile(np.eye(4), (n, 1, 1))
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2], T[:, :3, 3] = X, Y, Z, P
     types = p.types
     layers = p.layers
 
@@ -687,8 +656,6 @@ def main(argv=None):
     if not frame.Valid():
         frame = RDK.AddFrame(FRAME_NAME)
         force = True
-        print(f"WARNING: no frame named '{FRAME_NAME}' found -> created at FRAME_XYZRPY. "
-              f"If you moved a frame manually, check its exact name.")
     else:
         force = FORCE_FRAME_POSE
     if force:
@@ -712,16 +679,10 @@ def main(argv=None):
         bad = [k for k in tested
                if len(robot.SolveIK(mat(moves[k].pose)).rows) < 6]
         print(f"IK test ({len(tested)} moves tested): {len(bad)} unreachable")
-        if bad:
-            F = np.array(frame.PoseAbs().rows)          # part frame -> station
-            base = np.array(robot.PoseAbs().Pos())       # robot base in station
-            for k in bad[:8]:
-                p_abs = F[:3, :3] @ moves[k].pose[:3, 3] + F[:3, 3]
-                dist = np.linalg.norm(p_abs - base)
-                print(f"  move {k + 1}: {moves[k].label}")
-                print(f"      in part frame : {np.round(moves[k].pose[:3, 3], 1).tolist()}"
-                      f" | absolute: {np.round(p_abs, 1).tolist()}"
-                      f" | {dist:.0f} mm from robot base")
+        for k in bad[:8]:
+            p_abs = moves[k].pose[:3, 3] + np.array(frame.PoseAbs().Pos())
+            print(f"  move {k + 1}: {moves[k].label} "
+                  f"-> absolute approx {np.round(p_abs, 1).tolist()}")
 
     if DRAW_CURVES:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
