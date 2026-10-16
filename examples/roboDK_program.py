@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 # ------------------------- PARAMÈTRES -------------------------
-# Chemins relatifs (au répertoire courant de RoboDK, i.e. le dossier de la
-# station .rdk) : ne PAS utiliser __file__ ici, RoboDK copie le script dans
-# un dossier temporaire avant de l'exécuter.
+# Chemins relatifs : RoboDK copie ce script dans un dossier temporaire avant
+# de l'exécuter, donc ni __file__ ni le répertoire courant ne pointent vers
+# le dossier de la station. Les dossiers de données sont cherchés à l'exécution
+# (voir resolve_data_dir) : valeur telle quelle, puis à côté de la station
+# RoboDK ouverte (PATH_OPENSTATION), puis dans le répertoire courant.
 TRAJECTORIES_DIR = "trajectories"
 FIBERS_DIR = "fibers_transformed"
 
@@ -101,6 +103,20 @@ class Move:
     label: str
     pre: list = field(default_factory=list)     # ("comment"|"code"|"pause", valeur)
     post: list = field(default_factory=list)
+
+
+def resolve_data_dir(path, extra_bases=()):
+    """Cherche le dossier de données : chemin tel quel, puis le même nom de
+    dossier à côté de la station RoboDK ouverte / dans les répertoires donnés."""
+    candidates = [path]
+    name = os.path.basename(path.rstrip("/\\"))
+    for base in extra_bases:
+        if base:
+            candidates.append(os.path.join(base, name))
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return path
 
 
 def read_csv(path):
@@ -419,10 +435,20 @@ def main(argv=None):
     from robodk import robolink, robomath
 
     args = parse_args(argv)
-    plastic = load_plastic(args.trajectories, args.plastic_layer)
+
+    RDK = robolink.Robolink()
+    # Dossier de la station ouverte : les données (trajectories/,
+    # fibers_transformed/) vivent à côté du fichier .rdk.
+    station_dir = RDK.getParam("PATH_OPENSTATION") or ""
+    traj_dir = resolve_data_dir(args.trajectories, [station_dir, os.getcwd()])
+    fibers_dir = resolve_data_dir(args.fibers, [station_dir, os.getcwd()])
+    print(f"Dossier station : {station_dir or '?'}")
+    print(f"Trajectoires : {traj_dir}\nFibres : {fibers_dir}")
+
+    plastic = load_plastic(traj_dir, args.plastic_layer)
     moves, plastic_runs = plastic_moves(plastic)
 
-    _, files = find_fiber_files(args.fibers, args.fiber_layer)
+    _, files = find_fiber_files(fibers_dir, args.fiber_layer)
     fmoves, fiber_lines = fiber_moves(files)
 
     # montée verticale après le plastique, puis changement d'extrudeur
@@ -434,7 +460,6 @@ def main(argv=None):
         post=[("code", CHANGE_TO_COMPOSITE)], label="montée avant fibres"))
     moves += fmoves
 
-    RDK = robolink.Robolink()
     robot = RDK.ItemUserPick("Choisir le robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
         raise SystemExit("Aucun robot choisi")
