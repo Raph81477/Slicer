@@ -629,6 +629,8 @@ def main(argv=None):
     if not frame.Valid():
         frame = RDK.AddFrame(FRAME_NAME)
         force = True
+        print(f"WARNING: no frame named '{FRAME_NAME}' found -> created at FRAME_XYZRPY. "
+              f"If you moved a frame manually, check its exact name.")
     else:
         force = FORCE_FRAME_POSE
     if force:
@@ -652,10 +654,16 @@ def main(argv=None):
         bad = [k for k in tested
                if len(robot.SolveIK(mat(moves[k].pose)).rows) < 6]
         print(f"IK test ({len(tested)} moves tested): {len(bad)} unreachable")
-        for k in bad[:8]:
-            p_abs = moves[k].pose[:3, 3] + np.array(frame.PoseAbs().Pos())
-            print(f"  move {k + 1}: {moves[k].label} "
-                  f"-> absolute approx {np.round(p_abs, 1).tolist()}")
+        if bad:
+            F = np.array(frame.PoseAbs().rows)          # part frame -> station
+            base = np.array(robot.PoseAbs().Pos())       # robot base in station
+            for k in bad[:8]:
+                p_abs = F[:3, :3] @ moves[k].pose[:3, 3] + F[:3, 3]
+                dist = np.linalg.norm(p_abs - base)
+                print(f"  move {k + 1}: {moves[k].label}")
+                print(f"      in part frame : {np.round(moves[k].pose[:3, 3], 1).tolist()}"
+                      f" | absolute: {np.round(p_abs, 1).tolist()}"
+                      f" | {dist:.0f} mm from robot base")
 
     if DRAW_CURVES:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
