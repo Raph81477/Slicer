@@ -27,6 +27,9 @@ import numpy as np
 # RoboDK ouverte (PATH_OPENSTATION), puis dans le répertoire courant.
 TRAJECTORIES_DIR = "trajectories"
 FIBERS_DIR = "fibers_transformed"
+MOLD_DIR = "mold_trajectories"        # optionnel : si ce dossier existe à côté de la
+                                     # station, le moule est imprimé en premier
+PRINT_MOLD = True                    # False : ignorer le moule même s'il est présent
 
 PLASTIC_LAYER = "first"        # "first" = première couche trouvée, ou un n° de couche
 FIBER_LAYER = "first"          # "first" = plus petit i dans fibers/layer_i, ou un n° de couche
@@ -170,7 +173,7 @@ def decimate_path(T, step, max_angle, forced=()):
 
 
 # ----------------------------- plastique -----------------------------
-def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER):
+def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastique "):
     """Charge tous les segment_<j>.csv de la couche demandée en une trajectoire continue."""
     layer_dirs = {}
     for p in glob.glob(os.path.join(traj_dir, "layer_*")):
@@ -252,12 +255,12 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER):
 
     path = PlasticPath(points=P, types=T, layer=li, n_detours=int(detour.sum()),
                        source=layer_dirs[li], orientations=R)
-    print(f"Plastique : couche {li}, {len(files)} segments CSV, {len(P)} points, "
-          f"{path.n_detours} points de contournement -> leave")
+    print(f"{prefix[:-1].capitalize() if prefix else 'Plastique'} : couche {li}, {len(files)} segments CSV, "
+          f"{len(P)} points, {path.n_detours} points de contournement -> leave")
     return path
 
 
-def plastic_moves(p: PlasticPath):
+def plastic_moves(p: PlasticPath, prefix="plastique "):
     # Poses TCP : orientations complètes exportées par le slicer si
     # présentes, sinon Z vertical (buse vers le bas) + X de référence.
     if p.orientations is not None:
@@ -291,7 +294,7 @@ def plastic_moves(p: PlasticPath):
         nxt = types[idx[n + 1]] if n + 1 < len(idx) else None
         pre = []
         if t != prev_type:
-            pre.append(("comment", f"plastique couche {p.layer} - {t}"))
+            pre.append(("comment", f"{prefix}couche {p.layer} - {t}"))
             prev_type = t
         if printing and not printing_prev:
             pre.append(("code", PLASTIC_ON))
@@ -303,7 +306,7 @@ def plastic_moves(p: PlasticPath):
             pose=T[i],
             speed=SPEED_PLASTIC if t not in ("approach", "leave") else SPEED_TRAVEL,
             rounding=ROUNDING if (t == "curve" and nxt in PRINT_TYPES) else 0,
-            label=f"plastique {t} x={p.points[i,0]:.1f} y={p.points[i,1]:.1f} z={p.points[i,2]:.1f}",
+            label=f"{prefix}{t} x={p.points[i,0]:.1f} y={p.points[i,1]:.1f} z={p.points[i,2]:.1f}",
             pre=pre, post=[]))
     if printing_prev:
         moves[-1].post.append(("code", EXTRUDE_OFF))
@@ -320,7 +323,7 @@ def plastic_moves(p: PlasticPath):
             cur = []
     if len(cur) > 1:
         runs.append(np.array(cur))
-    print(f"Plastique : {len(p.points)} points -> {len(moves)} mouvements")
+    print(f"{prefix[:-1].capitalize() if prefix else 'Plastique'} : {len(p.points)} points -> {len(moves)} mouvements")
     return moves, runs
 
 
@@ -445,11 +448,32 @@ def main(argv=None):
     print(f"Dossier station : {station_dir or '?'}")
     print(f"Trajectoires : {traj_dir}\nFibres : {fibers_dir}")
 
+    # --- moule (optionnel) : imprimé en premier, plastique uniquement ---
+    mold_moves, mold_runs = [], []
+    if args.mold and not args.no_mold:
+        mold_dir = resolve_data_dir(args.mold, [station_dir, os.getcwd()])
+        if os.path.isdir(mold_dir):
+            mold = load_plastic(mold_dir, "first", prefix="moule ")
+            mold_moves, mold_runs = plastic_moves(mold, prefix="moule ")
+            print(f"Moule : {len(mold_moves)} mouvements")
+        else:
+            print(f"Moule ignoré : dossier {mold_dir} introuvable")
+
     plastic = load_plastic(traj_dir, args.plastic_layer)
     moves, plastic_runs = plastic_moves(plastic)
 
     _, files = find_fiber_files(fibers_dir, args.fiber_layer)
     fmoves, fiber_lines = fiber_moves(files)
+
+    # moule d'abord, puis montée + changement d'extrudeur vers le plastique
+    if mold_moves:
+        lift = mold_moves[-1].pose.copy()
+        lift[2, 3] += LIFT_Z
+        mold_moves.append(Move(
+            pose=lift, speed=SPEED_TRAVEL, rounding=0,
+            pre=[("comment", "fin du moule : montée avant la pièce")],
+            label="montée après moule"))
+    moves = mold_moves + moves
 
     # montée verticale après le plastique, puis changement d'extrudeur
     lift = moves[-1].pose.copy()
@@ -498,6 +522,7 @@ def main(argv=None):
             print(f"  mouvement {k + 1} : {moves[k].label}")
 
     if DRAW_CURVES:
+        draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
         draw_curves(RDK, robolink, frame, plastic_runs, "PrintTrace", [1, 0, 0, 1])
         draw_curves(RDK, robolink, frame, fiber_lines, "FiberTrace", [0, 0.3, 1, 1])
 
@@ -547,6 +572,10 @@ def parse_args(argv=None):
                         help="'first' ou numéro de couche plastique")
     parser.add_argument("--fiber-layer", default=FIBER_LAYER,
                         help="'first' ou numéro de couche de fibres")
+    parser.add_argument("--mold", default=MOLD_DIR if PRINT_MOLD else "",
+                        help="dossier CSV du moule (vide = ignorer le moule)")
+    parser.add_argument("--no-mold", action="store_true",
+                        help="ne pas imprimer le moule même s'il est présent")
     return parser.parse_args(argv)
 
 

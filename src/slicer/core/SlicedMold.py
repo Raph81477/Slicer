@@ -1594,3 +1594,56 @@ class SlicedMold(SlicedObject):
             )
 
         print(f"Support path exported to {filepath} ({len(layers)} layers)")
+
+    @classmethod
+    def export_layers_to_csv(
+        cls,
+        layers: list["SlicedMold"],
+        directory,
+        nozzle_diameter: float = 0.70,
+        infill_percentage: float = 20.0,
+        approach_distance: float = 1.0,
+        layer_height: float = 0.35,
+        approach_sign: float = -1.0,
+        simplify_tolerance: float | None = None,
+        shell_simplify_tolerance: float | None = None,
+        collapse_infill: bool = False,
+        infill_straight_tolerance: float = 0.05,
+    ) -> None:
+        """
+        Export the support printing paths of every mold layer, one CSV
+        file per segment: <directory>/layer_<i>/segment_<j>.csv (x, y, z +
+        tool orientation + type), the same layout as
+        SlicedPiece.export_layers_to_csv, ready to be loaded by the RoboDK
+        program generator.
+        """
+        directory = Path(directory)
+        for i, layer in enumerate(layers):
+            segments, types = layer.build_support_path(
+                nozzle_diameter=nozzle_diameter,
+                infill_percentage=infill_percentage,
+                approach_distance=approach_distance,
+                layer_height=layer_height,
+                shell_simplify_tolerance=shell_simplify_tolerance,
+                collapse_infill=collapse_infill,
+                infill_straight_tolerance=infill_straight_tolerance,
+            )
+            if simplify_tolerance is not None:
+                segments = [cls.simplify_polyline(seg, simplify_tolerance) for seg in segments]
+            segments = cls.drop_shared_points(segments)
+            orientations = cls.compute_path_orientation(segments, approach_sign=approach_sign)
+            layer_dir = directory / f"layer_{i}"
+            layer_dir.mkdir(parents=True, exist_ok=True)
+            for j, (seg, seg_type) in enumerate(zip(segments, types), start=1):
+                seg = np.asarray(seg, dtype=float)
+                if len(seg) == 0:
+                    continue
+                R = np.asarray(orientations[j - 1])
+                data = np.hstack([seg, R.transpose(0, 2, 1).reshape(len(seg), 9)])
+                path = layer_dir / f"segment_{j}.csv"
+                with open(path, mode="w", encoding="utf-8", newline="") as f:
+                    for row in data:
+                        coords = ",".join(f"{v:.5f}" for v in row[:3])
+                        axes = ",".join(f"{v:.5f}" for v in row[3:])
+                        f.write(f"{coords},{axes},{seg_type}\n")
+        print(f"Support path exported to {directory} ({len(layers)} layers, one CSV per segment)")
