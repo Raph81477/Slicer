@@ -653,7 +653,9 @@ def main(argv=None):
                if len(robot.SolveIK(mat(moves[k].pose)).rows) < 6]
         print(f"IK test ({len(tested)} moves tested): {len(bad)} unreachable")
         for k in bad[:8]:
-            print(f"  move {k + 1}: {moves[k].label}")
+            p_abs = moves[k].pose[:3, 3] + np.array(frame.PoseAbs().Pos())
+            print(f"  move {k + 1}: {moves[k].label} "
+                  f"-> absolute approx {np.round(p_abs, 1).tolist()}")
 
     if DRAW_CURVES:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
