@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation as Rot
 
 from oamc.core import CompositeModel
 from oamc.utils.vtk import compute_level_surface
-from slicer.SlicedObject import SlicedObject
+from slicer.core.SlicedObject import SlicedObject
 
 
 class SlicedPiece(SlicedObject):
@@ -57,6 +57,43 @@ class SlicedPiece(SlicedObject):
             fiber_paths[i] = raw_path[:, :3]
 
         return fiber_paths
+
+    @staticmethod
+    def save_fiber_paths(
+        fiber_paths: dict[int, np.ndarray],
+        directory: Path,
+        layer: int = 1,
+        normals: dict[int, np.ndarray] | None = None,
+        fmt: str = "%.5f",
+    ) -> list[Path]:
+        """
+        Save the fiber paths of a given layer to "fibers/layer_<layer>"
+        CSV files, in the same format as the oamc export (x, y, z, nx, ny,
+        nz): the files are named fiber_<layer>_<i>.csv and can be reloaded
+        with load_fiber_paths.
+
+        `normals` optionally provides one unit vector per point of each
+        fiber (same keying as fiber_paths); when omitted, the normals are
+        written as zeros.
+        """
+        layer_dir = Path(directory) / f"fibers/layer_{layer}"
+        layer_dir.mkdir(parents=True, exist_ok=True)
+
+        written = []
+        for i, path in fiber_paths.items():
+            points = np.asarray(path, dtype=float)
+            if normals is not None and i in normals:
+                n = np.asarray(normals[i], dtype=float)
+            else:
+                n = np.zeros_like(points)
+            rows = np.hstack([points, n])
+
+            csv_file = layer_dir / f"fiber_{layer}_{i}.csv"
+            with open(csv_file, mode="w", encoding="utf-8", newline="") as file:
+                np.savetxt(file, rows, delimiter=",", fmt=fmt)
+            written.append(csv_file)
+
+        return written
 
     @property
     def fiber_mean_direction(self) -> np.ndarray:
@@ -473,3 +510,74 @@ class SlicedPiece(SlicedObject):
             )
 
         print(f"Piece path exported to {filepath} ({len(pieces)} layers)")
+
+    @classmethod
+    def export_layers_to_csv(
+        cls,
+        pieces: list["SlicedPiece"],
+        directory,
+        contour_width: float = 3.0,
+        approach_distance: float = 1.0,
+        max_connection_length: float = 2.0,
+        contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
+        approach_sign: float = -1.0,
+        simplify_tolerance: float | None = None,
+    ) -> None:
+        """
+        Export the plastic printing paths of every layer, one directory
+        per layer: <directory>/layer_i/segment_j.csv, mirroring the fiber
+        layout saved by oamc's save_fibers (fibers/layer_i/fiber_i_j.csv).
+
+        Each CSV file holds one continuous path segment (curve, approach,
+        leave or connection) with the columns
+
+            x, y, z, ux, uy, uz, vx, vy, vz, wx, wy, wz, type
+
+        where (u, v, w) are the tool's X, Y, Z axes in world coordinates
+        (full rotation matrix columns, see export_path_to_txt) and `type`
+        is the segment type. Approach/leave/orientation conventions are
+        identical to export_layers_to_txt; only the file layout differs.
+        """
+        directory = Path(directory)
+
+        for i, piece in enumerate(pieces):
+            segments, _, types = piece.build_printing_path(
+                i_surface=i,
+                contour_width=contour_width,
+                approach_distance=approach_distance,
+                max_connection_length=max_connection_length,
+                contour_isovalues=contour_isovalues,
+            )
+
+            if simplify_tolerance is not None:
+                segments = [
+                    piece.simplify_polyline(seg, simplify_tolerance) for seg in segments
+                ]
+
+            segments = piece.drop_shared_points(segments)
+
+            orientations = piece.compute_path_orientation(
+                segments, approach_sign=approach_sign
+            )
+
+            layer_dir = directory / f"layer_{i}"
+            layer_dir.mkdir(parents=True, exist_ok=True)
+
+            for j, (seg, seg_type) in enumerate(zip(segments, types), start=1):
+                seg = np.asarray(seg, dtype=float)
+                if len(seg) == 0:
+                    continue
+
+                R = np.asarray(orientations[j - 1])
+                data = np.hstack(
+                    [seg, R.transpose(0, 2, 1).reshape(len(seg), 9)]
+                )
+
+                path = layer_dir / f"segment_{j}.csv"
+                with open(path, mode="w", encoding="utf-8", newline="") as f:
+                    for row in data:
+                        coords = ",".join(f"{v:.5f}" for v in row[:3])
+                        axes = ",".join(f"{v:.5f}" for v in row[3:])
+                        f.write(f"{coords},{axes},{seg_type}\n")
+
+        print(f"Piece path exported to {directory} ({len(pieces)} layers)")

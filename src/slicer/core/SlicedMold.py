@@ -8,7 +8,7 @@ from vtkmodules.vtkCommonCore import vtkIdList, vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkStaticCellLocator
 
 from oamc.core import CompositeModel
-from slicer.SlicedObject import SlicedObject
+from slicer.core.SlicedObject import SlicedObject
 
 
 class _RayCaster:
@@ -139,8 +139,8 @@ class SlicedMold(SlicedObject):
     def rotate_model(model: CompositeModel, rot_mat: np.ndarray) -> None:
         """Rotate the model's mesh nodes in place by the given rotation matrix."""
         model.mesh.nodes[:] = (rot_mat @ model.mesh.nodes.T).T
-        model.mold.nodes[:] = (rot_mat @ model.mold.nodes.T).T
-        object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
+        #model.mold.nodes[:] = (rot_mat @ model.mold.nodes.T).T
+        #object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
 
         new_polydata = model.mold.polydata.copy()
         new_polydata.points = (rot_mat @ model.mold.polydata.points.T).T
@@ -150,8 +150,8 @@ class SlicedMold(SlicedObject):
     def lift_model(model: CompositeModel, offset: float) -> None:
         """Translate the model's mesh nodes along Z by `offset`, in place."""
         model.mesh.nodes[:, 2] += offset
-        model.mold.nodes[:, 2] += offset
-        object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
+        #model.mold.nodes[:, 2] += offset
+        #object.__setattr__(model.mold, 'tree', cKDTree(model.mold.nodes))
 
         new_polydata = model.mold.polydata.copy()
         new_polydata.points = model.mold.polydata.points.copy()
@@ -440,6 +440,13 @@ class SlicedMold(SlicedObject):
         candidate_nodes, inverse = np.unique(candidate_faces.ravel(), return_inverse=True)
         face_node_idx = inverse.reshape(-1, 3)  # triangles indexing top_pts
 
+        if len(candidate_nodes) == 0:
+            raise ValueError(
+                "get_shadow_volume_vertical: no downward-facing face found on "
+                "the model's outer surface. Check that the model is correctly "
+                "rotated (SlicedMold.rotate_model) and lifted "
+                "(SlicedMold.lift_model) above the printing plane."
+            )
         print(f"Candidate nodes: {len(candidate_nodes)}")
 
         # "Upward-facing" surface used for the intersection tests
