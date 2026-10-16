@@ -41,8 +41,10 @@ FRAME_XYZRPY = [800, 0, 0, 0, 0, 0]  # ABSOLUTE in the station -> TO ADJUST
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
-VERTICAL_TOOL = True           # True: ignore the CSV orientation columns, the nozzle stays
-                               # normal to the z=0 plane (mold); False: orientation from the file
+VERTICAL_TOOL = True           # MOLD: ignore the orientation columns, the nozzle stays normal
+                               # to the z=0 plane (the mold is quasi-flat)
+PIECE_VERTICAL_TOOL = False   # PIECE (plastic CSV): False = orientation from the file (5-axis);
+                               # True = vertical nozzle like the mold
 VERTICAL_SIGN = -1             # (vertical mode) -1: TCP Z towards -Z of the part frame (nozzle
                                # down); +1: up
 TOOL_AXIS = "w"                # file axis that gives the nozzle axis: "u", "v" or "w"
@@ -433,7 +435,8 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
     Same logic as the original mold viewer's build_poses."""
     P = p.points
     n = len(P)
-    if VERTICAL_TOOL or p.orientations is None:
+    vertical = VERTICAL_TOOL if prefix.startswith("mold") else PIECE_VERTICAL_TOOL
+    if vertical or p.orientations is None:
         Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (n, 1))
         T = frames_from_z(P, Z, FIXED_X)
     else:
