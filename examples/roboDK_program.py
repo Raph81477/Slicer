@@ -4,7 +4,7 @@ Usage : ouvrir RobotPrint_Printhead.rdk dans RoboDK, puis lancer ce script (Robo
 Unités : mm. Le code KRL (anisoprint_*) n'apparaît que dans le .src exporté, pas en simulation.
 
 Fichiers attendus (trajectories/, à côté de ce script) :
-  trajectories/layer_<i>/segment_<j>.csv   x,y,z,type,layer   (plastique, header sur la 1re ligne)
+  trajectories/layer_<i>/segment_<j>.csv   x,y,z,ux..wz,type  (plastique, 13 colonnes, cf. SlicedPiece.export_layers_to_csv)
   fibers/layer_<i>/fiber_<i>_<j>.csv        x,y,z,nx,ny,nz    (fibres, 5 décimales)
 Plastique et fibres doivent être dans le même repère (repère pièce).
 """
@@ -38,6 +38,9 @@ FIXED_X = [0, 1, 0]            # vecteur de référence pour X du TCP (évite le
 # --- Plastique ---
 MIN_STEP = 3.0                 # mm : distance mini entre deux points gardés
 DETOUR_Z_TOL = 0.2             # mm : point curve/connection plus bas que la hauteur d'impression - tol = contournement -> 'leave'
+DETOUR_MAX_ZSPAN = 1.0         # mm : heuristique valable seulement sur une couche quasi plate ;
+                                # au-delà de cette amplitude de z sur les points imprimés, la
+                                # couche est non planaire et la détection est désactivée
 
 # --- Vitesses / arrondi ---
 SPEED_PLASTIC = 50             # mm/s (0,05 m/s)
@@ -84,6 +87,7 @@ class PlasticPath:
     layer: int
     n_detours: int = 0
     source: str = ""
+    orientations: np.ndarray | None = None   # (N, 3, 3) rotations TCP exportées par le slicer, si présentes
 
 
 @dataclass
@@ -169,18 +173,27 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER):
     if not files:
         raise SystemExit(f"Aucun segment_<j>.csv dans {layer_dirs[li]}")
 
-    points, types = [], []
+    points, types, rots = [], [], []
     for _, path in files:
         rows, header = read_csv(path)
         if not rows or len(rows[0]) < 4:
-            raise SystemExit(f"{path} : attendu x,y,z,type (au moins 4 colonnes)")
+            raise SystemExit(f"{path} : attendu x,y,z[,axes],type (au moins 4 colonnes)")
         pts = np.array([[float(v) for v in r[0:3]] for r in rows])
-        # Colonne 'type' : libellé texte (export "labels") ou valeur
-        # numérique (export "orientation", 0 = leave, 1 = curve).
-        if header is not None and "type" in header:
-            raw = [r[header.index("type")] for r in rows]
-        else:
-            raw = [r[3] for r in rows]
+        # Orientation complète exportée par le slicer (13 colonnes :
+        # x,y,z puis les 9 coefficients des axes X/Y/Z du TCP), sinon None.
+        R = None
+        if len(rows[0]) >= 12:
+            try:
+                # Les 9 coefficients sont les axes X, Y, Z du TCP, à la
+                # suite : la rotation se reconstruit par transposée
+                # (colonnes = axes, cf. build_orthonormal_frames).
+                R = np.array([[float(v) for v in r[3:12]] for r in rows])
+                R = R.reshape(len(rows), 3, 3).transpose(0, 2, 1)
+            except ValueError:
+                R = None
+        # Colonne 'type' : dernière colonne, libellé texte (curve, ...)
+        # ou valeur numérique (0 = leave, 1 = curve).
+        raw = [r[-1] for r in rows]
         try:
             float(raw[0])
             labels = ["curve" if float(v) > 0.5 else "leave" for v in raw]
@@ -188,20 +201,30 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER):
             labels = raw
         points.append(pts)
         types.append(np.array(labels, dtype=object))
+        rots.append(R)
     P = np.vstack(points)
     T = np.concatenate(types)
+    R = np.vstack([r for r in rots if r is not None]) if all(r is not None for r in rots) else None
     if len(P) == 0:
         raise SystemExit(f"Aucun point dans {layer_dirs[li]}")
 
-    # contournements (sous une ligne déjà posée) -> 'leave' : pas d'impression
+    # contournements (sous une ligne déjà posée) -> 'leave' : pas d'impression.
+    # Heuristique basée sur la hauteur d'impression dominante : valable
+    # seulement sur une couche quasi plate ; sur une couche non planaire
+    # (z amort sur plus de DETOUR_MAX_ZSPAN), un z plus bas est légitime,
+    # on ne détecte donc rien.
     is_print = np.isin(T, PRINT_TYPES)
+    detour = np.zeros(len(P), bool)
     if is_print.any():
-        z = np.round(P[is_print][:, 2], 3)
-        zref = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
-        detour = is_print & (P[:, 2] < zref - DETOUR_Z_TOL)
-        T[detour] = "leave"
-    else:
-        detour = np.zeros(len(P), bool)
+        z_print = P[is_print][:, 2]
+        if z_print.max() - z_print.min() <= DETOUR_MAX_ZSPAN:
+            z = np.round(z_print, 3)
+            zref = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
+            detour = is_print & (P[:, 2] < zref - DETOUR_Z_TOL)
+            T[detour] = "leave"
+        else:
+            print(f"  couche non planaire (z sur {z_print.max() - z_print.min():.1f} mm) : "
+                  "détection de contournements désactivée")
 
     # doublons exacts consécutifs
     keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (T[1:] != T[:-1])
@@ -209,15 +232,22 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER):
     P, T = P[keep], T[keep]
 
     path = PlasticPath(points=P, types=T, layer=li, n_detours=int(detour.sum()),
-                       source=layer_dirs[li])
+                       source=layer_dirs[li], orientations=R)
     print(f"Plastique : couche {li}, {len(files)} segments CSV, {len(P)} points, "
           f"{path.n_detours} points de contournement -> leave")
     return path
 
 
 def plastic_moves(p: PlasticPath):
-    Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (len(p.points), 1))
-    T = frames_from_z(p.points, Z, FIXED_X)
+    # Poses TCP : orientations complètes exportées par le slicer si
+    # présentes, sinon Z vertical (buse vers le bas) + X de référence.
+    if p.orientations is not None:
+        T = np.tile(np.eye(4), (len(p.points), 1, 1))
+        T[:, :3, :3] = p.orientations
+        T[:, :3, 3] = p.points
+    else:
+        Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (len(p.points), 1))
+        T = frames_from_z(p.points, Z, FIXED_X)
     types = p.types
 
     # décimation : on garde aussi les changements de type
