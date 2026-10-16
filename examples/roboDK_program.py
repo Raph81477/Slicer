@@ -43,6 +43,10 @@ FORCE_FRAME_POSE = True
 # --- Orientation ---
 VERTICAL_SIGN = -1                  # plastic: tool Z towards -Z part (nozzle down)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
+FILE_ORIENTATION_SIGN = -1           # orientations read from the CSV files (piece): flip the
+                                    # exported tool Z axis when it points the wrong way.
+                                    # +1: keep as exported; -1: flip 180 deg about the
+                                    # exported tool X axis (nozzle to the other side).
 FIXED_X = [0, 1, 0]                 # reference vector for the tool's X axis
 
 # --- Plastic ---
@@ -429,7 +433,14 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
     # otherwise vertical Z (nozzle down) + reference X.
     if p.orientations is not None:
         T = np.tile(np.eye(4), (len(p.points), 1, 1))
-        T[:, :3, :3] = p.orientations
+        R = p.orientations
+        if FILE_ORIENTATION_SIGN < 0:
+            # Flip the tool 180 deg about its own X axis: Z -> -Z, Y -> -Y.
+            # F acts on the world side (left multiplication) so the exported
+            # tool X (direction of travel) is preserved.
+            flip = np.diag([1.0, -1.0, -1.0])
+            R = flip @ R
+        T[:, :3, :3] = R
         T[:, :3, 3] = p.points
     else:
         Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (len(p.points), 1))
