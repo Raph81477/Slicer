@@ -209,16 +209,23 @@ def decimate_path(T, step, max_angle, forced=()):
 # ----------------------------- mold -----------------------------
 def load_mold(path):
     """Load the mold trajectory from the single whitespace-separated txt
-    export: 'x y z type layer' per row (see SlicedMold.export_layers_to_txt)."""
-    data = np.loadtxt(path, ndmin=2)
-    if data.ndim != 2 or data.shape[1] < 4:
-        raise SystemExit(f"{path}: expected 'x y z type [layer]' columns, got shape {data.shape}")
-    P = data[:, 0:3]
-    # The type column is a small integer code (0-5) in the txt export;
-    # map it back to the segment labels used by the path builder.
-    code_to_type = {0: "curve", 1: "connection", 2: "curve", 3: "connection",
-                    4: "approach", 5: "approach"}
-    types = np.array([code_to_type.get(int(round(c)), "leave") for c in data[:, 3]], dtype=object)
+    export: 'x y z type layer' per row, with the segment type as a text
+    label (see SlicedMold.export_layers_to_txt)."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            try:
+                x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+            except ValueError:
+                continue  # header line
+            rows.append((x, y, z, parts[3]))
+    if not rows:
+        raise SystemExit(f"{path}: no usable rows found")
+    P = np.array([r[0:3] for r in rows])
+    types = np.array([r[3] for r in rows], dtype=object)
     is_print = np.isin(types, PRINT_TYPES)
     detour = np.zeros(len(P), bool)
     if is_print.any():
