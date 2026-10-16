@@ -473,3 +473,49 @@ class SlicedPiece(SlicedObject):
             )
 
         print(f"Piece path exported to {filepath} ({len(pieces)} layers)")
+
+    @classmethod
+    def export_layers_to_csv(
+        cls,
+        pieces: list["SlicedPiece"],
+        directory,
+        contour_width: float = 3.0,
+        approach_distance: float = 1.0,
+        max_connection_length: float = 2.0,
+        contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
+        simplify_tolerance: float | None = None,
+        merge_tolerance: float = 0.1,
+    ) -> None:
+        """
+        Build the full printing path for every given piece layer and write
+        each segment to its own CSV file:
+        <directory>/layer_<i>/segment_<j>.csv with the columns
+        x,y,z,type,layer, one point per row and a header on the first line.
+        Ready to be loaded by the RoboDK program generator.
+        """
+        directory = Path(directory)
+        for i, piece in enumerate(pieces):
+            segments, _, types = piece.build_printing_path(
+                i_surface=i,
+                contour_width=contour_width,
+                approach_distance=approach_distance,
+                max_connection_length=max_connection_length,
+                contour_isovalues=contour_isovalues,
+            )
+            if simplify_tolerance is not None:
+                segments = [cls.simplify_polyline(seg, simplify_tolerance) for seg in segments]
+            segments = cls.drop_shared_points(segments)
+            layer_dir = directory / f"layer_{i}"
+            layer_dir.mkdir(parents=True, exist_ok=True)
+            for j, (seg, seg_type) in enumerate(zip(segments, types)):
+                seg = np.asarray(seg, dtype=float)
+                if len(seg) == 0:
+                    continue
+                filepath = layer_dir / f"segment_{j}.csv"
+                with open(filepath, mode="w", encoding="utf-8", newline="") as file:
+                    writer = csv.writer(file)
+                    writer.writerow(["x", "y", "z", "type", "layer"])
+                    for point in seg:
+                        writer.writerow([f"{point[0]:.4f}", f"{point[1]:.4f}",
+                                          f"{point[2]:.4f}", seg_type, i])
+        print(f"Piece path exported to {directory} ({len(pieces)} layers, one CSV per segment)")

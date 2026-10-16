@@ -127,16 +127,16 @@ def main() -> None:
                 line_width=4 if seg_type == "connection" else 2,
             )
 
-        # Export the printing path of every layer to a single text file, ready
-    # to be loaded by an external trajectory simulator such as RoboDK.
-    SlicedPiece.export_layers_to_txt(
+        # Export the printing path of every layer to one CSV file per segment,
+    # ready to be loaded by the RoboDK program generator
+    # (examples/roboDK_program.py).
+    SlicedPiece.export_layers_to_csv(
         pieces[0:1],
-        DIR / "trajectories" / "piece_path.txt",
+        DIR / "trajectories",
         contour_width=3.0,
         approach_distance=1.0,
         max_connection_length=4 * 0.5,
-        include_orientation=True,
-        simplify_tolerance=0.5, #mm
+        simplify_tolerance=0.5,  # mm
     )
     plotter.show()
 
