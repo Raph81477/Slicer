@@ -50,6 +50,10 @@ DETOUR_Z_TOL = 0.2                  # mm: curve/connection point below print hei
 DETOUR_MAX_ZSPAN = 1.0              # mm: detour heuristic only valid on quasi-flat layers;
                                     # beyond this z spread over printed points the layer is
                                     # non-planar and detection is disabled
+MAX_ANGLE = 5.0                     # deg: also keep a point if the orientation rotates more than this
+LIFT_TRAVEL = True                  # True: approach/leave points below the print height are
+                                    # raised to zref + Z_LIFT
+Z_LIFT = 3.0                        # mm: clearance above the print height for travel moves
 
 # --- Speeds / rounding ---
 SPEED_PLASTIC = 50                  # mm/s (0.05 m/s)
@@ -107,11 +111,46 @@ PRINT_TYPES = ("curve", "connection")
 
 
 # ----------------------------- data -----------------------------
+def _layer_zref(P, types, layers):
+    """Dominant print height per layer (mode of the rounded z of print points)."""
+    zref = {}
+    for li in np.unique(layers):
+        m = (layers == li) & np.isin(types, PRINT_TYPES)
+        if m.any():
+            z = np.round(P[m][:, 2], 3)
+            zref[li] = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
+    return zref
+
+
+def relabel_detours(P, types, layers, z_tol=DETOUR_Z_TOL):
+    """curve/connection points below their layer's print height (passing under
+    an already-laid line) are relabeled 'leave': not printed."""
+    zref = _layer_zref(P, types, layers)
+    detour = np.zeros(len(P), bool)
+    for li, zr in zref.items():
+        m = (layers == li) & np.isin(types, PRINT_TYPES)
+        detour |= m & (P[:, 2] < zr - z_tol)
+    types[detour] = "leave"
+    return int(detour.sum())
+
+
+def lift_travel(P, types, layers, z_lift=Z_LIFT, z_tol=DETOUR_Z_TOL):
+    """approach/leave points below their layer's print height are raised to
+    zref + z_lift (clearance above the print plane for travel moves)."""
+    zref = _layer_zref(P, types, layers)
+    lifted = 0
+    for li, zr in zref.items():
+        m = (layers == li) & np.isin(types, ("approach", "leave")) & (P[:, 2] < zr - z_tol)
+        P[m, 2] = zr + z_lift
+        lifted += int(m.sum())
+    return lifted
+
+
 @dataclass
 class PlasticPath:
     points: np.ndarray           # (N, 3)
     types: np.ndarray            # (N,) strings: curve / connection / approach / leave
-    layer: int
+    layers: np.ndarray           # (N,) layer id per point (mold: read from file; piece: constant)
     n_detours: int = 0
     source: str = ""
     orientations: np.ndarray | None = None   # (N, 3, 3) tool rotations exported by the slicer
@@ -221,26 +260,29 @@ def load_mold(path):
                 x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
             except ValueError:
                 continue  # header line
-            rows.append((x, y, z, parts[3]))
+            layer = int(float(parts[4])) if len(parts) >= 5 else 0
+            rows.append((x, y, z, parts[3], layer))
     if not rows:
         raise SystemExit(f"{path}: no usable rows found")
     P = np.array([r[0:3] for r in rows])
     types = np.array([r[3] for r in rows], dtype=object)
-    is_print = np.isin(types, PRINT_TYPES)
-    detour = np.zeros(len(P), bool)
-    if is_print.any():
-        z_print = P[is_print][:, 2]
-        if z_print.max() - z_print.min() <= DETOUR_MAX_ZSPAN:
-            z = np.round(z_print, 3)
-            zref = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
-            detour = is_print & (P[:, 2] < zref - DETOUR_Z_TOL)
-            types[detour] = "leave"
+    layers = np.array([r[4] for r in rows])
+
+    # Detour detection per layer (a mold layer is quasi-flat by construction).
+    ndet = relabel_detours(P, types, layers)
+    if LIFT_TRAVEL:
+        nlift = lift_travel(P, types, layers)
+    else:
+        nlift = 0
+
+    # consecutive exact duplicates
     keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (types[1:] != types[:-1])
     keep = np.r_[True, keep]
-    P, types = P[keep], types[keep]
-    path_obj = PlasticPath(points=P, types=types, layer=0,
-                           n_detours=int(detour.sum()), source=path)
-    print(f"Mold: {len(P)} points from {os.path.basename(path)}")
+    P, types, layers = P[keep], types[keep], layers[keep]
+    path_obj = PlasticPath(points=P, types=types, layers=layers,
+                           n_detours=ndet, source=path)
+    print(f"Mold: {len(P)} points from {os.path.basename(path)}, "
+          f"layers {layers.min()}..{layers.max()}, {ndet} detour points -> leave, {nlift} lifted")
     return path_obj
 
 
@@ -303,21 +345,23 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
         raise SystemExit(f"No points in {layer_dirs[li]}")
 
     # Detours (below an already-laid line) -> 'leave': no printing.
-    # Heuristic based on the dominant print height: only valid on a
-    # quasi-flat layer; on a non-planar layer (z spread over more than
-    # DETOUR_MAX_ZSPAN) a lower z is legitimate, so detect nothing.
+    # Heuristic based on the dominant print height per layer: only valid
+    # on a quasi-flat layer; on a non-planar layer (z spread over more
+    # than DETOUR_MAX_ZSPAN) a lower z is legitimate, so detect nothing.
     is_print = np.isin(T, PRINT_TYPES)
-    detour = np.zeros(len(P), bool)
+    layers_arr = np.full(len(P), li)
     if is_print.any():
         z_print = P[is_print][:, 2]
         if z_print.max() - z_print.min() <= DETOUR_MAX_ZSPAN:
-            z = np.round(z_print, 3)
-            zref = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
-            detour = is_print & (P[:, 2] < zref - DETOUR_Z_TOL)
-            T[detour] = "leave"
+            ndet = relabel_detours(P, T, layers_arr)
+            if LIFT_TRAVEL:
+                lift_travel(P, T, layers_arr)
         else:
+            ndet = 0
             print(f"  non-planar layer (z spread {z_print.max() - z_print.min():.1f} mm): "
                   "detour detection disabled")
+    else:
+        ndet = 0
 
     # consecutive exact duplicates
     keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (T[1:] != T[:-1])
@@ -326,10 +370,10 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
     if R is not None:
         R = R[keep]
 
-    path = PlasticPath(points=P, types=T, layer=li, n_detours=int(detour.sum()),
+    path = PlasticPath(points=P, types=T, layers=layers_arr, n_detours=ndet,
                        source=layer_dirs[li], orientations=R)
     print(f"{prefix.capitalize()}: layer {li}, {len(files)} CSV segments, {len(P)} points, "
-          f"{path.n_detours} detour points -> leave")
+          f"{ndet} detour points -> leave")
     return path
 
 
@@ -344,16 +388,22 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
         Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (len(p.points), 1))
         T = frames_from_z(p.points, Z, FIXED_X)
     types = p.types
+    layers = p.layers
 
-    # decimation: type changes are kept too
+    # Decimation: keep points on segment (type or layer) changes, and any
+    # point further than MIN_STEP or rotated more than MAX_ANGLE from the
+    # last kept one (same rules as the original mold viewer).
     keep, last = [0], 0
     for i in range(1, len(T)):
-        if types[i] != types[i - 1]:
+        seg_change = types[i] != types[i - 1] or layers[i] != layers[i - 1]
+        dist = np.linalg.norm(T[i, :3, 3] - T[last, :3, 3])
+        ang = rot_angle(T[last, :3, :3], T[i, :3, :3])
+        if seg_change:
             if keep[-1] != i - 1:
                 keep.append(i - 1)
             keep.append(i)
             last = i
-        elif (np.linalg.norm(T[i, :3, 3] - T[last, :3, 3]) >= MIN_STEP):
+        elif dist >= MIN_STEP or ang >= MAX_ANGLE:
             keep.append(i)
             last = i
     if keep[-1] != len(T) - 1:
@@ -367,7 +417,7 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
         nxt = types[idx[n + 1]] if n + 1 < len(idx) else None
         pre = []
         if t != prev_type:
-            pre.append(("comment", f"{prefix}layer {p.layer} - {t}"))
+            pre.append(("comment", f"{prefix}layer {layers[i]} - {t}"))
             prev_type = t
         if printing and not printing_prev:
             pre.append(("code", PLASTIC_ON))
@@ -383,19 +433,27 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
     if printing_prev:
         moves[-1].post.append(("code", FEED_OFF))
 
-    # print polylines for the trace
+    # Print polylines for the trace, one per continuous run of print points
+    # within the same layer; the preceding approach point (at print height)
+    # is prepended so a run whose only point is 'curve' still shows up
+    # (same behaviour as the original mold viewer).
     runs, cur = [], []
     is_p = np.isin(types, PRINT_TYPES)
     for i in range(len(p.points)):
-        if is_p[i]:
-            cur.append(p.points[i])
+        if is_p[i] and (not cur or layers[i] == layers[cur[-1]]):
+            cur.append(i)
         else:
-            if len(cur) > 1:
-                runs.append(np.array(cur))
-            cur = []
-    if len(cur) > 1:
-        runs.append(np.array(cur))
-    print(f"{prefix.capitalize()}: {len(p.points)} points -> {len(moves)} moves")
+            if cur:
+                runs.append(cur)
+            cur = [i] if is_p[i] else []
+    if cur:
+        runs.append(cur)
+    for run in runs:
+        j = run[0] - 1
+        if j >= 0 and types[j] == "approach" and layers[j] == layers[run[0]]:
+            run.insert(0, j)
+    runs = [np.array([p.points[i] for i in run]) for run in runs if len(run) > 1]
+    print(f"{prefix.capitalize()}: {len(p.points)} points -> {len(moves)} moves, {len(runs)} trace runs")
     return moves, runs
 
 
