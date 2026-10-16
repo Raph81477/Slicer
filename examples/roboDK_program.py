@@ -20,8 +20,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 # ------------------------- PARAMÈTRES -------------------------
-TRAJECTORIES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trajectories")
-FIBERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fibers")
+# Chemins relatifs (au répertoire courant de RoboDK, i.e. le dossier de la
+# station .rdk) : ne PAS utiliser __file__ ici, RoboDK copie le script dans
+# un dossier temporaire avant de l'exécuter.
+TRAJECTORIES_DIR = "trajectories"
+FIBERS_DIR = "fibers_transformed"
 
 PLASTIC_LAYER = "first"        # "first" = première couche trouvée, ou un n° de couche
 FIBER_LAYER = "first"          # "first" = plus petit i dans fibers/layer_i, ou un n° de couche
