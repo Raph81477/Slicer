@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 # ------------------------- PARAMETERS -------------------------
 # Relative paths: RoboDK copies this script to a temp folder before running
@@ -51,6 +52,10 @@ DETOUR_MAX_ZSPAN = 1.0              # mm: detour heuristic only valid on quasi-f
                                     # beyond this z spread over printed points the layer is
                                     # non-planar and detection is disabled
 MAX_ANGLE = 5.0                     # deg: also keep a point if the orientation rotates more than this
+DETOUR_XY_RADIUS = 1.0              # mm: local detour detection (non-planar layers): a print point
+                                    # passing this close in XY under an already-laid line is a detour
+TRAVEL_XY_RADIUS = 5.0              # mm: local travel lift (non-planar layers): approach/leave
+                                    # points below a print line within this XY radius are raised
 LIFT_TRAVEL = True                  # True: approach/leave points below the print height are
                                     # raised to zref + Z_LIFT
 Z_LIFT = 3.0                        # mm: clearance above the print height for travel moves
@@ -120,6 +125,44 @@ def _layer_zref(P, types, layers):
             z = np.round(P[m][:, 2], 3)
             zref[li] = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
     return zref
+
+
+def relabel_detours_xy(P, types, xy_radius=DETOUR_XY_RADIUS, z_tol=DETOUR_Z_TOL):
+    """Local detour detection for non-planar layers: a curve/connection point
+    passing under an already-laid line (near-coincident in XY, lower in z)
+    is relabeled 'leave': not printed. Replaces the per-layer print-height
+    heuristic, which is meaningless when z varies across a layer."""
+    m = np.isin(types, PRINT_TYPES)
+    idx = np.where(m)[0]
+    detour = np.zeros(len(P), bool)
+    if len(idx) >= 2:
+        tree = cKDTree(P[idx, :2])
+        pairs = tree.query_pairs(xy_radius, output_type="ndarray")
+        if len(pairs):
+            a, b = idx[pairs[:, 0]], idx[pairs[:, 1]]
+            za, zb = P[a, 2], P[b, 2]
+            detour[a[za < zb - z_tol]] = True
+            detour[b[zb < za - z_tol]] = True
+    types[detour] = "leave"
+    return int(detour.sum())
+
+
+def lift_travel_xy(P, types, xy_radius=TRAVEL_XY_RADIUS, z_lift=Z_LIFT, z_tol=DETOUR_Z_TOL):
+    """Local travel lift for non-planar layers: approach/leave points below a
+    nearby print line are raised above it (clearance for travel moves)."""
+    m = np.isin(types, PRINT_TYPES)
+    lifted = 0
+    if m.any():
+        print_pts = P[m]
+        tree = cKDTree(print_pts[:, :2])
+        for i in np.where(np.isin(types, ("approach", "leave")))[0]:
+            nb = tree.query_ball_point(P[i, :2], xy_radius)
+            if nb:
+                z_local = print_pts[nb, 2].max()
+                if P[i, 2] < z_local - z_tol:
+                    P[i, 2] = z_local + z_lift
+                    lifted += 1
+    return lifted
 
 
 def relabel_detours(P, types, layers, z_tol=DETOUR_Z_TOL):
@@ -350,6 +393,7 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
     # than DETOUR_MAX_ZSPAN) a lower z is legitimate, so detect nothing.
     is_print = np.isin(T, PRINT_TYPES)
     layers_arr = np.full(len(P), li)
+    ndet = 0
     if is_print.any():
         z_print = P[is_print][:, 2]
         if z_print.max() - z_print.min() <= DETOUR_MAX_ZSPAN:
@@ -357,11 +401,14 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic
             if LIFT_TRAVEL:
                 lift_travel(P, T, layers_arr)
         else:
-            ndet = 0
+            # Non-planar layer: the per-layer print-height heuristic is
+            # meaningless; use local XY detection instead (a point passing
+            # under an already-laid line is a detour).
             print(f"  non-planar layer (z spread {z_print.max() - z_print.min():.1f} mm): "
-                  "detour detection disabled")
-    else:
-        ndet = 0
+                  "local (XY) detour detection")
+            ndet = relabel_detours_xy(P, T)
+            if LIFT_TRAVEL:
+                lift_travel_xy(P, T)
 
     # consecutive exact duplicates
     keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (T[1:] != T[:-1])
