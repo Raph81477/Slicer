@@ -1,12 +1,14 @@
-"""Génère un programme RoboDK : 1re couche de plastique, puis 1re couche de fibres de carbone par-dessus.
+"""Generate a RoboDK program: full mold, then 1st plastic layer, then 1st carbon fiber layer on top.
 
-Usage : ouvrir RobotPrint_Printhead.rdk dans RoboDK, puis lancer ce script (RoboDK doit tourner).
-Unités : mm. Le code KRL (anisoprint_*) n'apparaît que dans le .src exporté, pas en simulation.
+Usage: open RobotPrint_Printhead.rdk in RoboDK, then run this script (RoboDK must be running).
+Units: mm. The HORST KRL calls (horst_*, bosch_retract, reset_sps) only appear in the
+exported .src file, not in simulation.
 
-Fichiers attendus (trajectories/, à côté de ce script) :
-  trajectories/layer_<i>/segment_<j>.csv   x,y,z,ux..wz,type  (plastique, 13 colonnes, cf. SlicedPiece.export_layers_to_csv)
-  fibers/layer_<i>/fiber_<i>_<j>.csv        x,y,z,nx,ny,nz    (fibres, 5 décimales)
-Plastique et fibres doivent être dans le même repère (repère pièce).
+Expected files (searched next to the open RoboDK station, see resolve_data_dir):
+  trajectories/layer_<i>/segment_<j>.csv   x,y,z,ux..wz,type   (plastic, 13 columns)
+  fibers_transformed/layer_<i>/fiber_<i>_<j>.csv  x,y,z,nx,ny,nz   (fibers)
+  mold_path.txt  x y z type layer  (optional mold, printed first)
+Plastic and fibers must be expressed in the same frame (part frame).
 """
 from __future__ import annotations
 
@@ -19,98 +21,129 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# ------------------------- PARAMÈTRES -------------------------
-# Chemins relatifs : RoboDK copie ce script dans un dossier temporaire avant
-# de l'exécuter, donc ni __file__ ni le répertoire courant ne pointent vers
-# le dossier de la station. Les dossiers de données sont cherchés à l'exécution
-# (voir resolve_data_dir) : valeur telle quelle, puis à côté de la station
-# RoboDK ouverte (PATH_OPENSTATION), puis dans le répertoire courant.
+# ------------------------- PARAMETERS -------------------------
+# Relative paths: RoboDK copies this script to a temp folder before running
+# it, so neither __file__ nor the current directory point to the station
+# folder. Data folders are resolved at runtime (see resolve_data_dir):
+# the value as given, then next to the open RoboDK station
+# (PATH_OPENSTATION), then the current directory.
 TRAJECTORIES_DIR = "trajectories"
 FIBERS_DIR = "fibers_transformed"
-MOLD_DIR = "mold_trajectories"        # optionnel : si ce dossier existe à côté de la
-                                     # station, le moule est imprimé en premier
-PRINT_MOLD = True                    # False : ignorer le moule même s'il est présent
+MOLD_FILE = "mold_path.txt"         # optional: printed first if present
+PRINT_MOLD = True                   # False: skip the mold even if present
 
-PLASTIC_LAYER = "first"        # "first" = première couche trouvée, ou un n° de couche
-FIBER_LAYER = "first"          # "first" = plus petit i dans fibers/layer_i, ou un n° de couche
+PLASTIC_LAYER = "first"             # "first" = first layer found, or a layer number
+FIBER_LAYER = "first"               # "first" = smallest i in fibers_transformed/layer_i
 
 FRAME_NAME = "PieceFrame"
-FRAME_XYZRPY = [800, 0, 0, 0, 0, 0]   # ABSOLU dans la station -> À AJUSTER
+FRAME_XYZRPY = [800, 0, 0, 0, 0, 0]  # ABSOLUTE in the station -> TO ADJUST
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
-VERTICAL_SIGN = -1             # plastique : Z du TCP vers -Z pièce (buse vers le bas)
-FIBER_TOOL_SIGN = -1           # fibres : Z du TCP = FIBER_TOOL_SIGN * normale (-1 si la normale sort de la pièce)
-FIXED_X = [0, 1, 0]            # vecteur de référence pour X du TCP (évite les rotations inutiles autour de la buse)
+VERTICAL_SIGN = -1                  # plastic: tool Z towards -Z part (nozzle down)
+FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
+FIXED_X = [0, 1, 0]                 # reference vector for the tool's X axis
 
-# --- Plastique ---
-MIN_STEP = 3.0                 # mm : distance mini entre deux points gardés
-DETOUR_Z_TOL = 0.2             # mm : point curve/connection plus bas que la hauteur d'impression - tol = contournement -> 'leave'
-DETOUR_MAX_ZSPAN = 1.0         # mm : heuristique valable seulement sur une couche quasi plate ;
-                                # au-delà de cette amplitude de z sur les points imprimés, la
-                                # couche est non planaire et la détection est désactivée
+# --- Plastic ---
+MIN_STEP = 3.0                      # mm: minimum distance between two kept points
+DETOUR_Z_TOL = 0.2                  # mm: curve/connection point below print height - tol -> 'leave'
+DETOUR_MAX_ZSPAN = 1.0              # mm: detour heuristic only valid on quasi-flat layers;
+                                    # beyond this z spread over printed points the layer is
+                                    # non-planar and detection is disabled
 
-# --- Vitesses / arrondi ---
-SPEED_PLASTIC = 50             # mm/s (0,05 m/s)
-SPEED_TRAVEL = 80              # mm/s (0,08 m/s)
-ROUNDING = 0.5                 # mm, seulement entre deux points d'impression consécutifs
+# --- Speeds / rounding ---
+SPEED_PLASTIC = 50                  # mm/s (0.05 m/s)
+SPEED_TRAVEL = 80                    # mm/s (0.08 m/s)
+ROUNDING = 0.5                      # mm, only between two consecutive print points
 
-# --- Fibres ---
-FIBER_MIN_STEP = 2.0           # mm
-FIBER_MAX_ANGLE = 5.0          # deg
-FIBER_ROUNDING = 0.5           # mm (0 sur le point de coupe et le dernier point)
-SPEED_FIBER = 5                # mm/s (0,005 m/s) fibre posée
-SPEED_FIBER_NO_FIBRE = 20      # mm/s (0,02 m/s) tracé trop court : plastique composite sans fibre
-MINIMAL_COMPOSITE_LENGTH = 80  # mm : en dessous, pas de fibre (comme le postprocessor)
-DISTANCE_CUT_TO_END = 50       # mm : la fibre est coupée à cette distance avant la fin du tracé
-FIBER_HOP = 5                  # mm : dégagement le long de la buse entre deux fibres
-LIFT_Z = 10                    # mm : montée verticale après le plastique, avant le changement d'extrudeur
+# --- Fibers ---
+FIBER_MIN_STEP = 2.0                # mm
+FIBER_MAX_ANGLE = 5.0               # deg
+FIBER_ROUNDING = 0.5                # mm (0 on the cut point and the last point)
+SPEED_FIBER = 5                     # mm/s (0.005 m/s) fiber laydown
+SPEED_FIBER_NO_FIBRE = 20           # mm/s (0.02 m/s) too-short path: composite plastic without fiber
+MINIMAL_COMPOSITE_LENGTH = 80       # mm: below this, no fiber (as in the postprocessor)
+DISTANCE_CUT_TO_END = 50            # mm: fiber cut this distance before the end of the path
+FIBER_HOP = 5                       # mm: retreat along the nozzle between two fibers
+LIFT_Z = 10                         # mm: vertical lift after the mold/plastic, before switching
 
-# --- Code KRL (identique au postprocessor) ---
-PLASTIC_TEMP, COMP_TEMP = 230, 250
-INIT_CODE = ["feeders_init(#Anisoprint_Plastic)",
-             f"anisoprint_temp(TRUE, {PLASTIC_TEMP}, FALSE, {COMP_TEMP})"]
-PLASTIC_ON = "anisoprint_set_feed(13,0,0)"
-EXTRUDE_OFF = "anisoprint_set_feed(0,0,0)"
-CHANGE_TO_COMPOSITE = f"aniso_change_extruder(FALSE, {PLASTIC_TEMP}, {COMP_TEMP})"
-FIBER_ON = "anisoprint_set_feed(0,100,50)"
-FIBER_ON_NO_FIBRE = "anisoprint_set_feed(0,0,50)"
-CUT_CODE = ["WAIT SEC 0.3", "anisoprint_retract(0,3,0,100)", "anisoprint_cut()", "WAIT SEC 0.7"]
-PLASTIC_OFF_DELAY = 500        # ms après arrêt plastique
-FIBER_OFF_DELAY = "WAIT SEC 0.5"
+# --- HORST KRL calls (per the HORST robotic printing API) ---
+TP_TEMP, CR_TEMP, CF_TEMP = 230, 205, 200
+# Initialization block (BAS): emitted as inserted code at the very start
+INIT_BAS_CODE = [
+    "BAS (#INITMOV,0)",
+    "BAS (#VEL_PTP,100)",
+    "BAS (#ACC_PTP,20)",
+    "$VEL.CP=0.04",
+    "BAS (#TOOL,0)",
+    "BAS (#BASE,0)",
+]
+# Printhead preparation: init -> extend -> temp -> set_feed
+HEAD_INIT_CODE = [
+    "horst_init()",
+    "horst_extend(1000, 0, 0, 1000)",
+    f"horst_temp(TRUE, {TP_TEMP}, TRUE, {CR_TEMP}, TRUE, {CF_TEMP})",
+]
+PLASTIC_ON = "horst_set_feed(35, 0)"        # TP feed 35%, no fiber feed
+FIBER_ON = "horst_set_feed(13, 100)"        # TP feed + CF feed 100%
+FIBER_ON_NO_FIBRE = "horst_set_feed(13, 0)"  # too-short path: composite plastic, no fiber
+FEED_OFF = "horst_set_feed(0, 0)"
+CUT_CODE = ["horst_cut()"]
+FIBER_RETRACT = "horst_retract(0, 200, 1000)"   # retract CF material before the cut
+# Termination block: cut -> retract modules -> heaters off -> PLC reset
+TERMINATION_CODE = [
+    "horst_cut()",
+    "bosch_retract()",
+    "horst_temp(FALSE, 0, FALSE, 0, FALSE, 0)",
+    "reset_sps()",
+]
 
 CHECK_REACH = True
 CHECK_STEP = 2
-DRAW_CURVES = True             # plastique en rouge, fibres en bleu (courbes RoboDK)
+DRAW_CURVES = True                  # mold orange, plastic red, fibers blue (RoboDK curves)
 # --------------------------------------------------------------
 
 PRINT_TYPES = ("curve", "connection")
 
 
-# ----------------------------- données -----------------------------
+# ----------------------------- data -----------------------------
 @dataclass
 class PlasticPath:
-    points: np.ndarray          # (N, 3)
-    types: np.ndarray          # (N,) chaînes : curve / connection / approach / leave
+    points: np.ndarray           # (N, 3)
+    types: np.ndarray            # (N,) strings: curve / connection / approach / leave
     layer: int
     n_detours: int = 0
     source: str = ""
-    orientations: np.ndarray | None = None   # (N, 3, 3) rotations TCP exportées par le slicer, si présentes
+    orientations: np.ndarray | None = None   # (N, 3, 3) tool rotations exported by the slicer
 
 
 @dataclass
 class Move:
-    pose: np.ndarray           # 4x4
+    pose: np.ndarray             # 4x4
     speed: float
     rounding: float
     label: str
-    pre: list = field(default_factory=list)     # ("comment"|"code"|"pause", valeur)
+    pre: list = field(default_factory=list)     # ("comment"|"code"|"pause", value)
     post: list = field(default_factory=list)
 
 
+def read_csv(path):
+    """Read a CSV with optional header -> (rows, header|None).
+
+    Returns raw string rows: the type column can be a label
+    ("curve", ...) or a numeric value, depending on the export."""
+    with open(path, encoding="utf-8", newline="") as f:
+        rows = [r for r in csv.reader(f) if r]
+    try:
+        float(rows[0][0])
+        return rows, None
+    except ValueError:
+        return rows[1:], rows[0]
+
+
 def resolve_data_dir(path, extra_bases=()):
-    """Cherche le dossier de données : chemin tel quel, puis le même nom de
-    dossier à côté de la station RoboDK ouverte / dans les répertoires donnés."""
+    """Find the data folder: the path as given, then the same folder name
+    next to the open RoboDK station / in the given directories."""
     candidates = [path]
     name = os.path.basename(path.rstrip("/\\"))
     for base in extra_bases:
@@ -122,27 +155,27 @@ def resolve_data_dir(path, extra_bases=()):
     return path
 
 
-def read_csv(path):
-    """Lit un CSV avec en-tête optionnel -> (rows, header|None).
+def resolve_data_file(path, extra_bases=()):
+    """Find a data file: as given, then next to the open RoboDK station / in
+    the given directories (same file name)."""
+    candidates = [path]
+    name = os.path.basename(path)
+    for base in extra_bases:
+        if base:
+            candidates.append(os.path.join(base, name))
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return path
 
-    Renvoie les lignes brutes en chaînes : le type peut être un libellé
-    ("curve", ...) ou une valeur numérique, selon l'export."""
-    with open(path, encoding="utf-8", newline="") as f:
-        rows = [r for r in csv.reader(f) if r]
-    try:
-        float(rows[0][0])
-        return rows, None
-    except ValueError:
-        return rows[1:], rows[0]
 
-
-# ----------------------- utilitaires géométrie -----------------------
+# ----------------------- geometry helpers -----------------------
 def frames_from_z(P, Z, ref):
-    """Matrices 4x4 : Z donné, X = projection de ref dans le plan normal à Z."""
+    """4x4 matrices: given Z, X = projection of ref onto the plane normal to Z."""
     Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
     ref = np.tile(np.array(ref, float), (len(Z), 1))
     X = ref - (ref * Z).sum(1, keepdims=True) * Z
-    bad = np.linalg.norm(X, axis=1) < 0.1          # Z presque // ref : référence de secours
+    bad = np.linalg.norm(X, axis=1) < 0.1          # Z nearly parallel to ref: fallback
     if bad.any():
         alt = np.tile(np.array([1.0, 0, 0]) if abs(ref[0, 0]) < 0.9 else np.array([0, 1.0, 0]), (bad.sum(), 1))
         X[bad] = alt - (alt * Z[bad]).sum(1, keepdims=True) * Z[bad]
@@ -159,7 +192,8 @@ def rot_angle(Ra, Rb):
 
 
 def decimate_path(T, step, max_angle, forced=()):
-    """Indices gardés : début, fin, points forcés, et tout point à > step ou > max_angle du dernier gardé."""
+    """Kept indices: start, end, forced points, and any point > step or > max_angle
+    from the last kept one."""
     keep, last = [0], 0
     forced = set(forced)
     for i in range(1, len(T)):
@@ -172,19 +206,50 @@ def decimate_path(T, step, max_angle, forced=()):
     return keep
 
 
-# ----------------------------- plastique -----------------------------
-def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastique "):
-    """Charge tous les segment_<j>.csv de la couche demandée en une trajectoire continue."""
+# ----------------------------- mold -----------------------------
+def load_mold(path):
+    """Load the mold trajectory from the single whitespace-separated txt
+    export: 'x y z type layer' per row (see SlicedMold.export_layers_to_txt)."""
+    data = np.loadtxt(path, ndmin=2)
+    if data.ndim != 2 or data.shape[1] < 4:
+        raise SystemExit(f"{path}: expected 'x y z type [layer]' columns, got shape {data.shape}")
+    P = data[:, 0:3]
+    # The type column is a small integer code (0-5) in the txt export;
+    # map it back to the segment labels used by the path builder.
+    code_to_type = {0: "curve", 1: "connection", 2: "curve", 3: "connection",
+                    4: "approach", 5: "approach"}
+    types = np.array([code_to_type.get(int(round(c)), "leave") for c in data[:, 3]], dtype=object)
+    is_print = np.isin(types, PRINT_TYPES)
+    detour = np.zeros(len(P), bool)
+    if is_print.any():
+        z_print = P[is_print][:, 2]
+        if z_print.max() - z_print.min() <= DETOUR_MAX_ZSPAN:
+            z = np.round(z_print, 3)
+            zref = float(np.bincount(np.round((z - z.min()) * 1000).astype(int)).argmax()) / 1000 + z.min()
+            detour = is_print & (P[:, 2] < zref - DETOUR_Z_TOL)
+            types[detour] = "leave"
+    keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (types[1:] != types[:-1])
+    keep = np.r_[True, keep]
+    P, types = P[keep], types[keep]
+    path_obj = PlasticPath(points=P, types=types, layer=0,
+                           n_detours=int(detour.sum()), source=path)
+    print(f"Mold: {len(P)} points from {os.path.basename(path)}")
+    return path_obj
+
+
+# ----------------------------- plastic -----------------------------
+def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastic "):
+    """Load all segment_<j>.csv files of the requested layer into one continuous path."""
     layer_dirs = {}
     for p in glob.glob(os.path.join(traj_dir, "layer_*")):
         m = re.fullmatch(r"layer_(\d+)", os.path.basename(p))
         if m and os.path.isdir(p):
             layer_dirs[int(m.group(1))] = p
     if not layer_dirs:
-        raise SystemExit(f"Aucun dossier layer_<i> dans {traj_dir}")
+        raise SystemExit(f"No layer_<i> folder in {traj_dir}")
     li = min(layer_dirs) if layer == "first" else int(layer)
     if li not in layer_dirs:
-        raise SystemExit(f"Couche plastique {li} introuvable (dispo : {sorted(layer_dirs)})")
+        raise SystemExit(f"Plastic layer {li} not found (available: {sorted(layer_dirs)})")
 
     files = []
     for p in glob.glob(os.path.join(layer_dirs[li], "segment_*.csv")):
@@ -193,28 +258,28 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastiq
             files.append((int(m.group(1)), p))
     files.sort()
     if not files:
-        raise SystemExit(f"Aucun segment_<j>.csv dans {layer_dirs[li]}")
+        raise SystemExit(f"No segment_<j>.csv in {layer_dirs[li]}")
 
     points, types, rots = [], [], []
     for _, path in files:
         rows, header = read_csv(path)
         if not rows or len(rows[0]) < 4:
-            raise SystemExit(f"{path} : attendu x,y,z[,axes],type (au moins 4 colonnes)")
+            raise SystemExit(f"{path}: expected x,y,z[,axes],type (at least 4 columns)")
         pts = np.array([[float(v) for v in r[0:3]] for r in rows])
-        # Orientation complète exportée par le slicer (13 colonnes :
-        # x,y,z puis les 9 coefficients des axes X/Y/Z du TCP), sinon None.
+        # Full tool orientation exported by the slicer (13 columns:
+        # x,y,z then the 9 coefficients of the X/Y/Z axes), else None.
         R = None
         if len(rows[0]) >= 12:
             try:
-                # Les 9 coefficients sont les axes X, Y, Z du TCP, à la
-                # suite : la rotation se reconstruit par transposée
-                # (colonnes = axes, cf. build_orthonormal_frames).
+                # The 9 coefficients are the tool's X, Y, Z axes in a row:
+                # the rotation is rebuilt by transposing (columns = axes,
+                # see build_orthonormal_frames).
                 R = np.array([[float(v) for v in r[3:12]] for r in rows])
                 R = R.reshape(len(rows), 3, 3).transpose(0, 2, 1)
             except ValueError:
                 R = None
-        # Colonne 'type' : dernière colonne, libellé texte (curve, ...)
-        # ou valeur numérique (0 = leave, 1 = curve).
+        # Type column: last column, a text label (curve, ...) or a numeric
+        # value (0 = leave, 1 = curve).
         raw = [r[-1] for r in rows]
         try:
             float(raw[0])
@@ -228,13 +293,12 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastiq
     T = np.concatenate(types)
     R = np.vstack([r for r in rots if r is not None]) if all(r is not None for r in rots) else None
     if len(P) == 0:
-        raise SystemExit(f"Aucun point dans {layer_dirs[li]}")
+        raise SystemExit(f"No points in {layer_dirs[li]}")
 
-    # contournements (sous une ligne déjà posée) -> 'leave' : pas d'impression.
-    # Heuristique basée sur la hauteur d'impression dominante : valable
-    # seulement sur une couche quasi plate ; sur une couche non planaire
-    # (z amort sur plus de DETOUR_MAX_ZSPAN), un z plus bas est légitime,
-    # on ne détecte donc rien.
+    # Detours (below an already-laid line) -> 'leave': no printing.
+    # Heuristic based on the dominant print height: only valid on a
+    # quasi-flat layer; on a non-planar layer (z spread over more than
+    # DETOUR_MAX_ZSPAN) a lower z is legitimate, so detect nothing.
     is_print = np.isin(T, PRINT_TYPES)
     detour = np.zeros(len(P), bool)
     if is_print.any():
@@ -245,24 +309,26 @@ def load_plastic(traj_dir=TRAJECTORIES_DIR, layer=PLASTIC_LAYER, prefix="plastiq
             detour = is_print & (P[:, 2] < zref - DETOUR_Z_TOL)
             T[detour] = "leave"
         else:
-            print(f"  couche non planaire (z sur {z_print.max() - z_print.min():.1f} mm) : "
-                  "détection de contournements désactivée")
+            print(f"  non-planar layer (z spread {z_print.max() - z_print.min():.1f} mm): "
+                  "detour detection disabled")
 
-    # doublons exacts consécutifs
+    # consecutive exact duplicates
     keep = (np.abs(np.diff(P, axis=0)).sum(1) > 1e-6) | (T[1:] != T[:-1])
     keep = np.r_[True, keep]
     P, T = P[keep], T[keep]
+    if R is not None:
+        R = R[keep]
 
     path = PlasticPath(points=P, types=T, layer=li, n_detours=int(detour.sum()),
                        source=layer_dirs[li], orientations=R)
-    print(f"{prefix[:-1].capitalize() if prefix else 'Plastique'} : couche {li}, {len(files)} segments CSV, "
-          f"{len(P)} points, {path.n_detours} points de contournement -> leave")
+    print(f"{prefix.capitalize()}: layer {li}, {len(files)} CSV segments, {len(P)} points, "
+          f"{path.n_detours} detour points -> leave")
     return path
 
 
-def plastic_moves(p: PlasticPath, prefix="plastique "):
-    # Poses TCP : orientations complètes exportées par le slicer si
-    # présentes, sinon Z vertical (buse vers le bas) + X de référence.
+def plastic_moves(p: PlasticPath, prefix="plastic "):
+    # TCP poses: full orientations exported by the slicer when present,
+    # otherwise vertical Z (nozzle down) + reference X.
     if p.orientations is not None:
         T = np.tile(np.eye(4), (len(p.points), 1, 1))
         T[:, :3, :3] = p.orientations
@@ -272,7 +338,7 @@ def plastic_moves(p: PlasticPath, prefix="plastique "):
         T = frames_from_z(p.points, Z, FIXED_X)
     types = p.types
 
-    # décimation : on garde aussi les changements de type
+    # decimation: type changes are kept too
     keep, last = [0], 0
     for i in range(1, len(T)):
         if types[i] != types[i - 1]:
@@ -294,13 +360,12 @@ def plastic_moves(p: PlasticPath, prefix="plastique "):
         nxt = types[idx[n + 1]] if n + 1 < len(idx) else None
         pre = []
         if t != prev_type:
-            pre.append(("comment", f"{prefix}couche {p.layer} - {t}"))
+            pre.append(("comment", f"{prefix}layer {p.layer} - {t}"))
             prev_type = t
         if printing and not printing_prev:
             pre.append(("code", PLASTIC_ON))
         if not printing and printing_prev:
-            pre.append(("code", EXTRUDE_OFF))
-            pre.append(("pause", PLASTIC_OFF_DELAY))
+            pre.append(("code", FEED_OFF))
         printing_prev = printing
         moves.append(Move(
             pose=T[i],
@@ -309,9 +374,9 @@ def plastic_moves(p: PlasticPath, prefix="plastique "):
             label=f"{prefix}{t} x={p.points[i,0]:.1f} y={p.points[i,1]:.1f} z={p.points[i,2]:.1f}",
             pre=pre, post=[]))
     if printing_prev:
-        moves[-1].post.append(("code", EXTRUDE_OFF))
+        moves[-1].post.append(("code", FEED_OFF))
 
-    # polylignes d'impression pour le tracé
+    # print polylines for the trace
     runs, cur = [], []
     is_p = np.isin(types, PRINT_TYPES)
     for i in range(len(p.points)):
@@ -323,21 +388,21 @@ def plastic_moves(p: PlasticPath, prefix="plastique "):
             cur = []
     if len(cur) > 1:
         runs.append(np.array(cur))
-    print(f"{prefix[:-1].capitalize() if prefix else 'Plastique'} : {len(p.points)} points -> {len(moves)} mouvements")
+    print(f"{prefix.capitalize()}: {len(p.points)} points -> {len(moves)} moves")
     return moves, runs
 
 
-# ------------------------------- fibres -------------------------------
+# ------------------------------- fibers -------------------------------
 def load_fiber(path):
     rows, _ = read_csv(path)
     try:
         A = np.array([[float(v) for v in r] for r in rows], ndmin=2)
     except ValueError as e:
-        raise SystemExit(f"{path} : {e}")
+        raise SystemExit(f"{path}: {e}")
     if A.ndim != 2 or A.shape[1] < 6:
-        raise SystemExit(f"{path} : attendu x,y,z,nx,ny,nz (6 colonnes)")
+        raise SystemExit(f"{path}: expected x,y,z,nx,ny,nz (6 columns)")
     P, N = A[:, 0:3], A[:, 3:6]
-    keep = np.r_[True, np.abs(np.diff(P, axis=0)).sum(1) > 1e-6]   # doublons consécutifs
+    keep = np.r_[True, np.abs(np.diff(P, axis=0)).sum(1) > 1e-6]   # consecutive duplicates
     return P[keep], N[keep]
 
 
@@ -348,10 +413,10 @@ def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYER):
         if m and os.path.isdir(p):
             layers[int(m.group(1))] = p
     if not layers:
-        raise SystemExit(f"Aucun dossier layer_<i> dans {fiber_dir}")
+        raise SystemExit(f"No layer_<i> folder in {fiber_dir}")
     li = min(layers) if layer == "first" else int(layer)
     if li not in layers:
-        raise SystemExit(f"Couche de fibres {li} introuvable (dispo : {sorted(layers)})")
+        raise SystemExit(f"Fiber layer {li} not found (available: {sorted(layers)})")
     files = []
     for p in glob.glob(os.path.join(layers[li], f"fiber_{li}_*.csv")):
         m = re.fullmatch(rf"fiber_{li}_(\d+)\.csv", os.path.basename(p))
@@ -359,8 +424,8 @@ def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYER):
             files.append((int(m.group(1)), p))
     files.sort()
     if not files:
-        raise SystemExit(f"Aucun fichier fiber_{li}_<j>.csv dans {layers[li]}")
-    print(f"Fibres : couche {li}, {len(files)} fibres")
+        raise SystemExit(f"No fiber_{li}_<j>.csv file in {layers[li]}")
+    print(f"Fibers: layer {li}, {len(files)} fibers")
     return li, [p for _, p in files]
 
 
@@ -369,7 +434,7 @@ def fiber_moves(files):
     for path in files:
         P, N = load_fiber(path)
         if len(P) < 2:
-            print("  fibre ignorée (moins de 2 points) :", os.path.basename(path))
+            print("  fiber skipped (fewer than 2 points):", os.path.basename(path))
             continue
         polylines.append(P)
         T = frames_from_z(P, FIBER_TOOL_SIGN * N, FIXED_X)
@@ -385,39 +450,39 @@ def fiber_moves(files):
 
         def hop(Tk):
             H = Tk.copy()
-            H[:3, 3] = Tk[:3, 3] - FIBER_HOP * Tk[:3, 2]       # on recule le long de -Z du TCP
+            H[:3, 3] = Tk[:3, 3] - FIBER_HOP * Tk[:3, 2]       # retreat along -Z of the TCP
             return H
 
-        # 1) dégagement au-dessus du début
+        # 1) retreat above the start
         moves.append(Move(
             pose=hop(T[0]), speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", f"{name} - {L:.0f} mm, {'fibre' if with_fibre else 'SANS fibre (trop court)'}")],
-            label=f"{name} dégagement début"))
-        # 2) début de la fibre ; l'extrusion démarre une fois arrivé
+            pre=[("comment", f"{name} - {L:.0f} mm, {'fiber' if with_fibre else 'NO fiber (too short)'}")],
+            label=f"{name} start retreat"))
+        # 2) fiber start; extrusion starts once arrived
         speed = SPEED_FIBER if with_fibre else SPEED_FIBER_NO_FIBRE
         moves.append(Move(
             pose=T[idx[0]], speed=SPEED_TRAVEL, rounding=0,
             post=[("code", FIBER_ON if with_fibre else FIBER_ON_NO_FIBRE)],
-            label=f"{name} début"))
-        # 3) tracé
+            label=f"{name} start"))
+        # 3) laydown
         for k, i in enumerate(idx[1:], start=1):
             last = (k == len(idx) - 1)
             is_cut = (i == cut_i)
             post = []
             if is_cut:
-                post += [("code", c) for c in CUT_CODE]
+                post += [("code", FIBER_RETRACT)] + [("code", c) for c in CUT_CODE]
             if last:
-                post += [("code", EXTRUDE_OFF), ("code", FIBER_OFF_DELAY)]
+                post += [("code", FEED_OFF)]
             moves.append(Move(
                 pose=T[i], speed=speed,
                 rounding=0 if (last or is_cut) else FIBER_ROUNDING,
                 label=f"{name} pt {i}", post=post))
-        # 4) dégagement après la fin
+        # 4) retreat after the end
         moves.append(Move(pose=hop(T[idx[-1]]), speed=SPEED_TRAVEL, rounding=0,
-                          label=f"{name} dégagement fin"))
-        print(f"  {name} : {len(P)} points -> {len(idx)} gardés, longueur {L:.0f} mm"
-              f"{'' if with_fibre else ' (sans fibre)'}"
-              f"{f', coupe au point {cut_i}' if cut_i is not None else ''}")
+                          label=f"{name} end retreat"))
+        print(f"  {name}: {len(P)} points -> {len(idx)} kept, length {L:.0f} mm"
+              f"{'' if with_fibre else ' (no fiber)'}"
+              f"{f', cut at point {cut_i}' if cut_i is not None else ''}")
     return moves, polylines
 
 
@@ -440,24 +505,25 @@ def main(argv=None):
     args = parse_args(argv)
 
     RDK = robolink.Robolink()
-    # Dossier de la station ouverte : les données (trajectories/,
-    # fibers_transformed/) vivent à côté du fichier .rdk.
+    # Open station folder: the data (trajectories/, fibers_transformed/,
+    # mold_path.txt) lives next to the .rdk file.
     station_dir = RDK.getParam("PATH_OPENSTATION") or ""
-    traj_dir = resolve_data_dir(args.trajectories, [station_dir, os.getcwd()])
-    fibers_dir = resolve_data_dir(args.fibers, [station_dir, os.getcwd()])
-    print(f"Dossier station : {station_dir or '?'}")
-    print(f"Trajectoires : {traj_dir}\nFibres : {fibers_dir}")
+    bases = [station_dir, os.getcwd()]
+    traj_dir = resolve_data_dir(args.trajectories, bases)
+    fibers_dir = resolve_data_dir(args.fibers, bases)
+    print(f"Station folder: {station_dir or '?'}")
+    print(f"Trajectories: {traj_dir}\nFibers: {fibers_dir}")
 
-    # --- moule (optionnel) : imprimé en premier, plastique uniquement ---
+    # --- mold (optional): printed first, plastic only ---
     mold_moves, mold_runs = [], []
-    if args.mold and not args.no_mold:
-        mold_dir = resolve_data_dir(args.mold, [station_dir, os.getcwd()])
-        if os.path.isdir(mold_dir):
-            mold = load_plastic(mold_dir, "first", prefix="moule ")
-            mold_moves, mold_runs = plastic_moves(mold, prefix="moule ")
-            print(f"Moule : {len(mold_moves)} mouvements")
+    if PRINT_MOLD and not args.no_mold:
+        mold_file = resolve_data_file(args.mold, bases)
+        if os.path.isfile(mold_file):
+            mold = load_mold(mold_file)
+            mold_moves, mold_runs = plastic_moves(mold, prefix="mold ")
+            print(f"Mold: {len(mold_moves)} moves")
         else:
-            print(f"Moule ignoré : dossier {mold_dir} introuvable")
+            print(f"Mold skipped: file {mold_file} not found")
 
     plastic = load_plastic(traj_dir, args.plastic_layer)
     moves, plastic_runs = plastic_moves(plastic)
@@ -465,31 +531,34 @@ def main(argv=None):
     _, files = find_fiber_files(fibers_dir, args.fiber_layer)
     fmoves, fiber_lines = fiber_moves(files)
 
-    # moule d'abord, puis montée + changement d'extrudeur vers le plastique
+    # mold first, then a lift before the part
     if mold_moves:
         lift = mold_moves[-1].pose.copy()
         lift[2, 3] += LIFT_Z
         mold_moves.append(Move(
             pose=lift, speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", "fin du moule : montée avant la pièce")],
-            label="montée après moule"))
+            pre=[("comment", "mold done: lift before the part")],
+            label="lift after mold"))
     moves = mold_moves + moves
 
-    # montée verticale après le plastique, puis changement d'extrudeur
+    # vertical lift after the plastic, then extruder change
     lift = moves[-1].pose.copy()
     lift[2, 3] += LIFT_Z
     moves.append(Move(
         pose=lift, speed=SPEED_TRAVEL, rounding=0,
-        pre=[("comment", "changement d'extrudeur : plastique -> composite")],
-        post=[("code", CHANGE_TO_COMPOSITE)], label="montée avant fibres"))
+        pre=[("comment", "extruder change: plastic -> composite")],
+        label="lift before fibers"))
     moves += fmoves
 
-    robot = RDK.ItemUserPick("Choisir le robot", robolink.ITEM_TYPE_ROBOT)
+    # termination: heaters off etc., emitted after the last move
+    moves[-1].post += [("code", c) for c in TERMINATION_CODE]
+
+    robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
-        raise SystemExit("Aucun robot choisi")
+        raise SystemExit("No robot picked")
     tool = robot.getLink(robolink.ITEM_TYPE_TOOL)
     if not tool.Valid():
-        raise SystemExit("Aucun outil attaché au robot : attache la tête d'impression dans RoboDK")
+        raise SystemExit("No tool attached to the robot: attach the printhead in RoboDK")
 
     frame = RDK.Item(FRAME_NAME, robolink.ITEM_TYPE_FRAME)
     if not frame.Valid():
@@ -500,8 +569,8 @@ def main(argv=None):
     if force:
         frame.setParent(RDK.ActiveStation())
         frame.setPoseAbs(robomath.xyzrpw_2_pose(FRAME_XYZRPY))
-    print("Repère pièce (absolu) :", np.round(frame.PoseAbs().Pos(), 1),
-          "| base du robot (absolu) :", np.round(robot.PoseAbs().Pos(), 1))
+    print("Part frame (absolute):", np.round(frame.PoseAbs().Pos(), 1),
+          "| robot base (absolute):", np.round(robot.PoseAbs().Pos(), 1))
 
     old = RDK.Item("PrintPlasticFiber", robolink.ITEM_TYPE_PROGRAM)
     if old.Valid():
@@ -517,9 +586,9 @@ def main(argv=None):
         tested = list(range(0, len(moves), CHECK_STEP))
         bad = [k for k in tested
                if len(robot.SolveIK(mat(moves[k].pose)).rows) < 6]
-        print(f"Test IK ({len(tested)} mouvements testés) : {len(bad)} inaccessibles")
+        print(f"IK test ({len(tested)} moves tested): {len(bad)} unreachable")
         for k in bad[:8]:
-            print(f"  mouvement {k + 1} : {moves[k].label}")
+            print(f"  move {k + 1}: {moves[k].label}")
 
     if DRAW_CURVES:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
@@ -539,6 +608,12 @@ def main(argv=None):
             elif kind == "pause":
                 prog.Pause(val)
 
+    # Initialization: BAS block + printhead preparation, before any movement
+    emit([("comment", "--- Initialization ---")])
+    emit([("code", c) for c in INIT_BAS_CODE])
+    emit([("comment", "--- Printhead preparation ---")])
+    emit([("code", c) for c in HEAD_INIT_CODE])
+
     cur_speed = cur_round = None
     for n, m in enumerate(moves):
         if m.speed != cur_speed:
@@ -550,32 +625,31 @@ def main(argv=None):
         emit(m.pre)
         if n == 0:
             prog.MoveJ(mat(m.pose))
-            emit([("code", c) for c in INIT_CODE])      # comme le postprocessor : après le premier PTP
         else:
             prog.MoveL(mat(m.pose))
         emit(m.post)
 
     try:
-        print("Vérification RoboDK :", prog.Update()[-1])
+        print("RoboDK check:", prog.Update()[-1])
     except Exception as e:
-        print("prog.Update() indisponible :", e)
-    print(f"Programme 'PrintPlasticFiber' créé : {len(moves)} mouvements. Lance-le ou simule-le.")
+        print("prog.Update() unavailable:", e)
+    print(f"Program 'PrintPlasticFiber' created: {len(moves)} moves. Run it or simulate it.")
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--trajectories", default=TRAJECTORIES_DIR,
-                        help="dossier contenant layer_<i>/segment_<j>.csv (plastique)")
+                        help="folder holding layer_<i>/segment_<j>.csv (plastic)")
     parser.add_argument("--fibers", default=FIBERS_DIR,
-                        help="dossier contenant layer_<i>/fiber_<i>_<j>.csv (fibres)")
+                        help="folder holding layer_<i>/fiber_<i>_<j>.csv (fibers)")
     parser.add_argument("--plastic-layer", default=PLASTIC_LAYER,
-                        help="'first' ou numéro de couche plastique")
+                        help="'first' or a plastic layer number")
     parser.add_argument("--fiber-layer", default=FIBER_LAYER,
-                        help="'first' ou numéro de couche de fibres")
-    parser.add_argument("--mold", default=MOLD_DIR if PRINT_MOLD else "",
-                        help="dossier CSV du moule (vide = ignorer le moule)")
+                        help="'first' or a fiber layer number")
+    parser.add_argument("--mold", default=MOLD_FILE,
+                        help="mold txt file (empty = skip the mold)")
     parser.add_argument("--no-mold", action="store_true",
-                        help="ne pas imprimer le moule même s'il est présent")
+                        help="do not print the mold even if present")
     return parser.parse_args(argv)
 
 
