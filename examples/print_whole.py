@@ -84,7 +84,7 @@ def build_model() -> CompositeModel:
         dbc=model.dbc,
         nbc=model.nbc,
         fiber_diameter=NOZZLE_DIAMETER,
-        layer_height=1.0,
+        layer_height=0.35,
     )
 
     rot_mat = SlicedPiece.get_rotation_matrix(model)
@@ -158,7 +158,7 @@ def add_printing_layers(
     model: CompositeModel,
     rot_mat: np.ndarray,
     n_layers: int,
-    vis_layer_height: float = 2.0,
+    vis_layer_height: float = 0.35,
 ) -> None:
     """Part layer surfaces and printing paths, as in print_layers.py."""
     fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
