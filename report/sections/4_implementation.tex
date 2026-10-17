@@ -1,0 +1,595 @@
+% ======================================================================
+\section{Implementation}\label{sec:implementation}
+% ======================================================================
+
+This chapter describes the Python realization of the methodology of
+Chapter~\ref{sec:methodology}: the package layout, the class
+architecture, the role of the main methods with their signatures and
+the non-trivial implementation choices, the performance engineering,
+and the connection to the robot simulator RoboDK.
+
+The package is small by design --- about 2\,750 lines of Python spread
+over three modules --- because all heavy geometry is delegated to VTK
+filters through PyVista, and all array mathematics is vectorized with
+NumPy. The implementation effort concentrates on three things:
+\emph{correctness} of the geometric conventions (clipping, normals,
+chaining), \emph{performance} of the hot paths (caching and
+vectorization), and \emph{extensibility} (the class hierarchy
+separating generic layer behavior from piece- and mold-specific
+behavior).
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lll}
+\toprule
+Module & Lines & Content \\
+\midrule
+\texttt{src/slicer/SlicedObject.py} & 687 & base class: geometry, path stitching, frames, export \\
+\texttt{src/slicer/SlicedPiece.py}  & 475 & composite piece layers: fibers, slicing planes, model prep \\
+\texttt{src/slicer/SlicedMold.py}   & 1589 & mold: shadow volumes, mold slicing, infill crossing, paths \\
+\bottomrule
+\end{tabular}
+\caption{Modules of the \texttt{slicer} package.}
+\label{tab:modules}
+\end{table}
+
+% ----------------------------------------------------------------------
+\subsection{Package layout and dependencies}
+% ----------------------------------------------------------------------
+
+The package follows the \texttt{src/} layout with a minimal
+\texttt{pyproject.toml} (setuptools backend, Python $\ge$ 3.10):
+\begin{lstlisting}[caption={Package layout.}]
+slicer/
+  pyproject.toml
+  src/slicer/
+    __init__.py        # exports SlicedObject, SlicedPiece, SlicedMold
+    SlicedObject.py    # base class
+    SlicedPiece.py     # the composite part
+    SlicedMold.py      # the support structure
+  examples/
+    print_layers.py    # end-to-end example: piece
+    mold_generation.py # end-to-end example: mold + fibers
+    fibers/layer_*/    # fiber path CSV files
+    c_beam_large_thin.dat  # APDL model
+\end{lstlisting}
+Dependencies are \texttt{pyvista}, \texttt{numpy} and \texttt{scipy};
+the slicer additionally imports the model layer from the companion
+library \texttt{oamc} (\texttt{CompositeModel},
+\texttt{compute\_level\_surface}) and, on the mold side, a few VTK
+classes directly (\texttt{vtkStaticCellLocator}, \texttt{vtkPoints},
+\texttt{vtkIdList}) for the performance-critical ray casting
+(\S\ref{sec:impl-perf}).
+
+% ----------------------------------------------------------------------
+\subsection{Class architecture}\label{sec:impl-arch}
+% ----------------------------------------------------------------------
+
+\begin{figure}[htbp]
+\centering
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1em}
+\texttt{SlicedObject}\\
+\footnotesize surface + caches; dist-to-boundary; offset zones;\\
+\footnotesize contour polylines; local normals; segment chaining;\\
+\footnotesize single-pass stitching; tool frames; RDP; text export\\[0.8em]
+$\uparrow$\hspace{0.6em}$\uparrow$\\[0.2em]
+\texttt{SlicedPiece}\hspace{2em}\texttt{SlicedMold}\\
+\footnotesize fiber paths, mean direction,\hspace{2.2em}\footnotesize shadow volumes, dist-to-part, fixed grid\\
+\footnotesize fiber-aligned planes, model rotation\hspace{0.4em}\footnotesize infill crossing cuts, crossing blocker,\\
+\footnotesize \& lifting, isosurface layers\hspace{3.7em}\footnotesize overridden approach normals, mold paths
+\vspace{1em}}}
+\caption{Class hierarchy of the \texttt{slicer} package.}
+\label{fig:classes}
+\end{figure}
+
+The three classes split responsibilities along one axis: \emph{what is
+generic to any sliced layer} versus \emph{what is specific to what is
+being printed}.
+
+\begin{itemize}
+  \item \texttt{SlicedObject} is instantiated with a single
+        \texttt{pv.PolyData} --- one layer surface --- and knows nothing
+        about the object the surface comes from. It provides the
+        distance-to-boundary machinery, offset zones, contour
+        extraction, polyline handling, the entire path-stitching
+        engine, tool-frame computation, simplification and export.
+  \item \texttt{SlicedPiece} \emph{adds} fiber knowledge: it carries a
+        dictionary of fiber polylines per layer, computes their mean
+        direction, generates the fiber-aligned infill planes, and adds
+        the model-level preparation (rotation matrix, layer extraction
+        from the \texttt{oamc} grid).
+  \item \texttt{SlicedMold} both \emph{adds} (shadow-volume
+        construction, distance-to-part field, fixed XY grid, crossing
+        management) and \emph{overrides}: its approach/leave moves use
+        the \emph{part} surface normals instead of the mold layer
+        normals.
+\end{itemize}
+
+The override deserves a comment, because it is the hinge of the
+design. The base class exposes two normal lookups,
+\texttt{get\_local\_normal} (single point) and
+\texttt{get\_local\_normals} (batched). All downstream consumers ---
+approach/leave construction, frame computation, path export --- go
+through the batched lookup, and the batched lookup of
+\texttt{SlicedMold} samples the part surface. To make single-point and
+batched behavior impossible to diverge, the base class routes
+\texttt{get\_local\_normal} through \texttt{get\_local\_normals} and
+provides an internal dispatcher (\texttt{\_normals\_at}) that calls the
+per-point method \emph{only if} a subclass has overridden it, and the
+fast batched method otherwise. A subclass therefore only needs to
+override the batched method to change the normal semantics everywhere
+at once.
+
+% ----------------------------------------------------------------------
+\subsection{\texttt{SlicedObject}: the generic layer}\label{sec:impl-object}
+% ----------------------------------------------------------------------
+
+\subsubsection{Surface property and cache invalidation}
+
+The class holds its geometry in a \texttt{surface} property with a
+setter. The setter is not cosmetic: assigning a new mesh invalidates
+two cached quantities, the cell-normals array and the
+distance-to-boundary state flag. This matters because the piece path
+builder \emph{reassigns} \texttt{self.surface} mid-algorithm (after
+merging duplicate points, which renumbers all points); without the
+invalidation, stale normals and distance fields would silently poison
+every subsequent computation. The caching is lazy: the cell normals,
+for instance, are normalized once on first access and stored; PyVista's
+\texttt{cell\_normals} attribute recomputes the whole mesh when no
+normals array is attached, so an accidental per-point access in a loop
+would otherwise dominate the runtime.
+
+\subsubsection{Distance-to-boundary and offset zones}
+
+\begin{lstlisting}[caption={Distance field and offset zone (essence).}]
+def build_distance_tree(self):
+    edges = self.surface.extract_feature_edges()
+    boundary_points = edges.points
+    tree = cKDTree(boundary_points)
+    distances, _ = tree.query(self.surface.points, workers=-1)
+    self.surface["dist_to_boundary"] = distances
+
+def build_offset_surface(self, value, invert=False):
+    if not self._distance_tree_built:
+        self.build_distance_tree()
+    return self.surface.clip_scalar(scalars="dist_to_boundary",
+                                    value=value, invert=invert)
+\end{lstlisting}
+Boundary detection is VTK's feature-edge extraction on the layer
+surface; the nearest-neighbor query runs on all cores
+(\texttt{workers=-1}). The offset zone is a scalar clip: VTK cuts and
+re-triangulates every cell crossed by the isovalue, so the zone's
+boundary lies \emph{exactly} on the isoline $d = c$. The docstring
+spells out the \texttt{invert} convention (\texttt{invert=True} keeps
+$d \le c$), which is the single most error-prone convention of the
+whole pipeline.
+
+\subsubsection{Contour polylines and segment chaining}
+
+Isolines are extracted with the contour filter on
+\texttt{dist\_to\_boundary} and converted to ordered polylines. The
+conversion goes through \texttt{vtkStripper} (via
+\texttt{PolyData.strip}) and a manual walk over the stripped
+connectivity array: VTK stores polylines as
+\texttt{[n$_1$, id$_{11}$\,\dots\,id$_{1n_1}$, n$_2$, \dots]}, and the
+parser collects each run as a point array. A second, more robust
+chaining (\texttt{\_chain\_segments}, used for plane cuts) works
+directly on the raw segment graph: degree counting, junction detection,
+neighbor walks --- described in \S\ref{sec:meth-chaining}.
+
+\subsubsection{Single-pass stitching}
+
+The core of the path logic is \texttt{build\_path\_single\_pass},
+which implements the greedy algorithm of \S\ref{sec:meth-stitching}.
+Its implementation is dominated by two data structures:
+
+\begin{itemize}
+  \item the \emph{endpoint table}: a $(2N \times 3)$ NumPy array with
+        row $2k$ the first point of curve $k$ and row $2k+1$ its last
+        point, plus a boolean activity mask. The nearest-endpoint query
+        is then a single vectorized squared-distance computation
+        (\texttt{einsum}) with masked-out inactive rows --- the
+        previous implementation rebuilt a Kd-tree at every iteration,
+        which is exactly the kind of per-iteration setup cost the
+        rewrite removes.
+  \item the \emph{command list} \texttt{Lcmd}: for each printed
+        endpoint, the coordinate and the code
+        (approach/connection/continuation), later consumed by the
+        export.
+\end{itemize}
+
+Sub-paths are delimited by \texttt{approach}/\texttt{leave} segments
+built along the endpoint normals (batched, from the endpoint table).
+The optional \texttt{connection\_blocker} --- a callable
+$(p_{\text{start}}, p_{\text{end}}) \to \texttt{bool}$ --- lets the
+caller inject a topological constraint into the stitching without the
+stitching engine knowing anything about it; the mold passes its
+crossing blocker there (\S\ref{sec:impl-mold}).
+
+\texttt{build\_full\_printing\_path} runs the engine twice --- once on
+the pure curves (shells) with codes (5, 3, 2), once on the composite
+curves (fiber-aligned infill) with codes (4, 1, 0) --- and concatenates
+the two passes.
+
+\subsubsection{Tool frames and export}
+
+The frame machinery mirrors the methodology of
+\S\ref{sec:meth-frames}:
+\begin{itemize}
+  \item \texttt{compute\_path\_normals} stacks all points of all
+        segments into one array and issues a \emph{single} batched
+        closest-cell query (the locator is built once internally);
+  \item \texttt{compute\_path\_tangents} uses central differences
+        inside each segment and one-sided differences at the ends;
+  \item \texttt{build\_orthonormal\_frames} is fully vectorized over
+        all points of all segments: Gram--Schmidt against the
+        (sign-flipped) normals, degenerate-tangent fallback, and a
+        final \texttt{np.split} back into per-segment arrays. The
+        output convention is documented in the docstring: column 0/1/2
+        of each $3\times3$ frame is the tool X/Y/Z axis in world
+        coordinates, i.e.\ the rotation part of a robot pose.
+\end{itemize}
+
+The export path is \texttt{export\_printing\_path}, a convenience
+wrapper that (optionally) simplifies each segment with RDP
+(\texttt{simplify\_polyline}, the iterative implementation described in
+\S\ref{sec:meth-simplify}), drops the duplicated junction points
+(\texttt{drop\_shared\_points}), computes the orientations \emph{on the
+simplified points} --- so the written orientation always matches the
+written geometry --- and delegates to \texttt{export\_path\_to\_txt}.
+The low-level writer builds one printf-style format string per segment
+(baking in the constant type/layer labels) and writes each segment with
+a single \texttt{np.savetxt} call; in \texttt{"a"} mode it appends
+rows without rewriting the header, which is how multi-layer export
+accumulates one file.
+
+% ----------------------------------------------------------------------
+\subsection{\texttt{SlicedPiece}: the composite part}\label{sec:impl-piece}
+% ----------------------------------------------------------------------
+
+\subsubsection{Fiber data}
+
+\texttt{load\_fiber\_paths} reads the CSV files of a layer directory
+(\texttt{fibers/layer\_\textit{L}/fiber\_\textit{L}\_\textit{i}.csv}),
+each file one polyline. The mean direction is computed once per
+instance and cached; when \texttt{slice\_model} builds all layers with
+the same fiber dictionary, the cache of the first layer is copied to
+the others, so the PCA runs exactly once per print job.
+
+The PCA itself is three lines of NumPy --- directions stacked, uncentered
+second-moment matrix, dominant eigenvector --- but it is guarded by two
+documented subtleties: the centering trap (\S\ref{sec:meth-fibers}) and
+the sign determinism.
+
+\subsubsection{Slicing planes and single-pass cutting}
+
+\texttt{generate\_slicing\_planes} implements the $\pm45^\circ$
+direction of \S\ref{sec:meth-fibers} and returns the plane family as a
+list of \texttt{\{"origin", "normal"\}} dictionaries.
+
+The cutting is where a major performance idea lives:
+\texttt{\_cut\_with\_planes} does \emph{not} call \texttt{slice} once
+per plane. Since the planes are parallel, they are the level sets of the
+single scalar field $s(\mathbf{p}) = \mathbf{p}\cdot\mathbf{m}$; the
+method attaches that field to the zone and calls the contour filter
+once with \emph{all} the levels. One mesh traversal replaces $n$. The
+chaining then runs on the multi-level contour output, with the
+junction-fallback of \S\ref{sec:meth-chaining} (the fallback is
+\texttt{\_cut\_with\_planes\_slow}, one \texttt{slice} per plane, used
+only when the graph has junctions).
+
+\subsubsection{Model-level preparation}
+
+\begin{itemize}
+  \item \texttt{\_layer\_levels} queries the \texttt{oamc} grid for the
+        list of $q$ values; \texttt{get\_printing\_layers} extracts the
+        isosurfaces (optionally only a subset --- extracting isosurfaces
+        is the expensive model-level operation); \texttt{slice\_model}
+        returns a list of \texttt{SlicedPiece};
+        \texttt{from\_model} builds a single layer by index, extracting
+        only the requested isosurface.
+  \item \texttt{get\_mean\_surface\_normals} averages cell normals over
+        all layer surfaces; \texttt{get\_rotation\_matrix} builds the
+        axis--angle rotation of \S\ref{sec:meth-orient} with
+        \texttt{scipy.spatial.transform.Rotation}.
+\end{itemize}
+
+\subsubsection{Per-layer path assembly}
+
+\texttt{build\_printing\_path} chains the operations of
+\S\ref{sec:meth-shells}--\ref{sec:meth-fibers} on one layer: merge
+points (with the cache invalidation this triggers), generate the
+planes, clip the inner zone, cut the infill in one pass, extract the
+contour-shell isolines, and stitch the two passes. The parameters
+expose the physically meaningful knobs: contour width (3\,mm in the
+example), approach distance (1\,mm), max connection length, and the
+shell isovalues.
+
+\texttt{export\_layers\_to\_txt} loops over all layers, builds each
+path and appends to the trajectory file
+(\texttt{mode="w"} for the first layer, \texttt{"a"} afterwards).
+
+% ----------------------------------------------------------------------
+\subsection{\texttt{SlicedMold}: the support structure}\label{sec:impl-mold}
+% ----------------------------------------------------------------------
+
+The mold module is the largest of the three; it contains the shadow
+volume builders, the mold slicing loop, the infill crossing machinery,
+and the mold path builder.
+
+\subsubsection{Overridden normals and the \texttt{\_RayCaster} helper}
+
+The class stores the \emph{part} surface (its own property, with the
+same cache-invalidation pattern as the base class) and overrides
+\texttt{get\_local\_normals} to query the part's closest cells ---
+implementing the "approach against the part" semantics of
+\S\ref{sec:meth-frames}.
+
+The module also defines \texttt{\_RayCaster}, a thin wrapper around
+\texttt{vtkStaticCellLocator}: the locator is built \emph{once} per
+surface, and \texttt{hits(start, end)} returns every intersection of a
+segment with the mesh. The wrapper exists because
+\texttt{PolyData.ray\_trace} may rebuild its locator on every call
+depending on the PyVista version --- and the shadow-volume builders
+cast thousands of rays.
+
+\subsubsection{Three shadow-volume builders}
+
+\begin{itemize}
+  \item \texttt{get\_shadow\_volume}: extract the downward-facing cells
+        of the outer surface, project their points vertically, build
+        the wedges (\texttt{\_wedge\_volume}).
+  \item \texttt{get\_shadow\_volume\_cone}: the cone-of-rays method of
+        \S\ref{sec:meth-shadow}. The implementation is a textbook case
+        of the project's performance doctrine: for every ray direction,
+        all \emph{cheap} tests (does the ray even point down? is the
+        plane hit inside the part's bounding box? is it far enough from
+        the convex-hull contour?) are evaluated for all faces at once
+        as boolean NumPy masks; only the surviving (face, ray) pairs
+        are actually cast against the single locator. The free pairs
+        are then assembled by a 2D Delaunay triangulation of the top
+        points and the wedge builder.
+  \item \texttt{get\_shadow\_volume\_vertical}: the occlusion-aware
+        vertical projection. Per node, the bottom point defaults to the
+        vertical projection onto the plane and is replaced by the
+        first intersection with the part's upward-facing surface when
+        the vertical segment is blocked; per triangle, a prism-validity
+        ray test discards wedges whose extrusion would cross the part.
+        Again, bounding-box pre-filters keep the actual ray count low,
+        and the method also returns the two point clouds for
+        visualization.
+\end{itemize}
+
+\texttt{slice\_model} composes the vertical projection with the
+slicing loop in one call; \texttt{rotate\_model} /
+\texttt{lift\_model} implement the in-place model transformation of
+\S\ref{sec:meth-orient} (nodes, Kd-tree and PolyData of the mold are
+all updated, using \texttt{object.\_\_setattr\_\_} to bypass the frozen
+dataclass fields of the \texttt{oamc} model).
+
+\subsubsection{The slicing loop}
+
+\texttt{slice\_shadow\_volume} implements \S\ref{sec:meth-moldslice}.
+Beyond what the methodology chapter describes, three implementation
+details are worth recording:
+
+\begin{itemize}
+  \item the \textbf{fixed infill levels} are computed from the
+        \emph{bounds of layer zero's isosurface} (falling back to the
+        volume bounds if the first layer is empty) and stored once on
+        the class, then passed to every \texttt{SlicedMold} instance
+        --- the fix that earned the project's first pull request;
+  \item the \textbf{distance-to-part} uses
+        \texttt{compute\_implicit\_distance} against the triangulated,
+        cleaned part surface, rather than sampling the volume's field
+        (the contour filter's carried values differ from the volume's
+        own interpolation);
+  \item the shells are chained through \texttt{vtkStripper} here
+        (single-level contours, where the stripper behaves), unlike
+        the multi-level piece contours where manual chaining is
+        required.
+\end{itemize}
+
+The grid cutting itself reuses the single-pass idea in its axis form
+(\texttt{\_cut\_axis\_planes}): the coordinate
+$x$ (resp.\ $y$) is the scalar field, all levels are contoured at once,
+chained, and the polylines are then re-sorted plane by plane.
+
+\subsubsection{Infill crossing machinery}
+
+The crossing management of \S\ref{sec:meth-crossings} is factored
+around a shared engine, \texttt{\_cut\_secondary\_lines}, with two
+public wrappers:
+
+\begin{itemize}
+  \item \texttt{cut\_infill\_at\_intersections}: exact
+        version, every (secondary, primary) segment pair tested;
+  \item \texttt{cut\_infill\_at\_intersections\_fast}: a Kd-tree on
+        primary-segment midpoints restricts each secondary segment to
+        the primary segments within
+        (half its length + spacing + nozzle width) --- the tests
+        themselves stay vectorized per secondary polyline.
+\end{itemize}
+
+The curvilinear bookkeeping is generic polyline code:
+\texttt{interpolate\_polyline\_at} (binary search in the cumulative
+length, linear interpolation), \texttt{sample\_polyline\_between}, and
+\texttt{\_cut\_polyline\_at\_positions} (exclusion zones of radius
+$d_{\mathrm{nozzle}}/2$ around each cut, merged when overlapping).
+
+\subsubsection{Mold path building}
+
+\texttt{build\_support\_path} assembles one layer:
+
+\begin{enumerate}
+  \item computes the geometric max connection length
+        (\texttt{compute\_max\_connection\_length}: the diagonal
+        $\sqrt{s^2 + h^2}$ with a 1.1 safety margin);
+  \item sorts each infill family into \emph{zigzag order}
+        (by mean coordinate along the family axis, every other line
+        reversed) --- this is what makes the greedy stitching produce
+        the classic back-and-forth sweep instead of random jumps;
+  \item assigns primary/secondary by layer parity and cuts the
+        secondary family at the crossings;
+  \item optionally simplifies: RDP on the shells
+        (\texttt{shell\_simplify\_tolerance}) and/or infill collapse
+        (\texttt{collapse\_infill}, guarded by
+        \texttt{collapse\_infill\_line} and its monotonicity safety
+        net, \S\ref{sec:meth-simplify});
+  \item stitches two passes with \texttt{build\_path\_single\_pass}:
+        shells first, then infill (primary + cut secondary) with the
+        \textbf{crossing blocker}
+        (\texttt{\_make\_crossing\_blocker}: a closure that broadcasts
+        the candidate connection against all primary segments through
+        the vectorized 2D intersection test --- a forbidden crossing
+        becomes a leave + approach pair).
+\end{enumerate}
+
+\texttt{export\_layers\_to\_txt} loops over all mold layers and writes
+the single trajectory file, exactly like the piece version.
+
+% ----------------------------------------------------------------------
+\subsection{Performance engineering}\label{sec:impl-perf}
+% ----------------------------------------------------------------------
+
+Performance was a first-class requirement, not an afterthought: the
+input meshes are finite-element models with tens of thousands of cells,
+and the naive implementation of several stages is quadratically slow.
+The doctrine applied throughout the package is uniform and worth
+summarizing:
+
+\begin{enumerate}
+  \item \textbf{Compute once, cache.} Every quantity that depends only
+        on the mesh (cell normals, Kd-trees, locators, PCA of the
+        fibers) is computed on first use and stored; caches are
+        explicitly invalidated when the geometry changes (the
+        \texttt{surface} setter) or shared between instances (the
+        fiber direction across layers).
+  \item \textbf{Batch every query.} All closest-cell lookups, distance
+        queries and normal queries are issued for entire point arrays
+        in one call, never point by point; the locator build cost is
+        amortized over the whole batch. The stitching's
+        nearest-endpoint search is a masked vectorized distance
+        computation, replacing a per-iteration Kd-tree build.
+  \item \textbf{Replace repeated traversals by single multi-level
+        filters.} Parallel plane cuts are one contour call with all
+        levels (\S\ref{sec:impl-piece}); axis-plane grids are one
+        contour call per direction (\S\ref{sec:impl-mold}).
+  \item \textbf{Filter before you cast.} In the ray-based stages, every
+        test that does not need an actual ray cast (bounding boxes,
+        distance to the convex hull, direction signs) is evaluated for
+        all faces at once as NumPy masks; only survivors reach the
+        single locator. One of the builders' docstrings states it as a
+        rule: "only the surviving (face, ray) pairs are actually
+        cast".
+  \item \textbf{Index pairwise tests.} The infill crossing tests use a
+        Kd-tree on segment midpoints to avoid $O(NM)$ pairwise
+        segment intersection.
+  \item \textbf{Vectorize I/O.} The trajectory writer builds per-segment
+        format strings and writes each segment with one
+        \texttt{np.savetxt} call, instead of formatting every point in
+        Python.
+\end{enumerate}
+
+% ----------------------------------------------------------------------
+\subsection{Interface with RoboDK}\label{sec:impl-robodk}
+% ----------------------------------------------------------------------
+
+The slicer never talks to the robot directly; the contract between
+them is the exported trajectory file, and RoboDK is the offline
+programming environment where the trajectory becomes a robot program.
+
+\subsubsection{What the export provides}
+
+For every trajectory point, RoboDK receives:
+\begin{itemize}
+  \item the position $(x, y, z)$;
+  \item the full orientation, as the nine components of the tool frame
+        --- directly reshaped into the rotation block of a $4 \times 4$
+        pose matrix;
+  \item the segment type, which distinguishes \emph{printed} moves
+        (\texttt{curve}, \texttt{connection}) from \emph{travel} moves
+        (\texttt{approach}, \texttt{leave}) --- the equivalent of
+        G-code's distinction between extruding and travel moves, at
+        robot level;
+  \item the pass family (pure vs.\ composite command codes, 
+        \S\ref{sec:meth-stitching}), telling the post-processor which
+        deposition state to select;
+  \item the layer index, so the program can be organized into layers
+        and resumed per layer.
+\end{itemize}
+
+This is strictly more information than a planar slicer provides, and
+each item exists for a robotic reason: the orientation because a
+six-DoF arm has three rotational DoF to feed; the travel/printed
+distinction because approach and leave moves run at travel speed
+without extrusion; the layer index because the physical process
+prints layer by layer even when the layers are curved.
+
+\subsubsection{RoboDK-side workflow}
+
+The intended RoboDK workflow is:
+\begin{enumerate}
+  \item import the trajectory file (a Python or CSV post-processor
+        reads each row, builds the pose from the coordinates and
+        rotation block, and emits a \texttt{MoveJ} to the first
+        approach point and \texttt{MoveL} targets along the path);
+  \item attach the deposition tool (extruder) to the robot and set the
+        tool frame so that the trajectory's approach axis
+        ($\mathbf{z}$, pointing into the surface) matches the tool's
+        spindle axis;
+  \item simulate: RoboDK checks reachability and collisions against
+        the cell and the part being built, which the slicer
+        deliberately does not do (\S\ref{sec:intro});
+  \item generate the program for the target robot controller.
+\end{enumerate}
+
+The \texttt{robodk} Python package is listed in the project
+dependencies (commented out in \texttt{pyproject.toml}, since it is
+only needed in the robot cell, not for slicing), and the exported
+row format (position + 9 rotation components + labels) maps one-to-one
+onto RoboDK's \texttt{AddTarget}/pose APIs.
+
+\subsubsection{Why not G-code}
+
+A classical slicer would export G-code; this project exports a pose
+table instead, for three reasons. First, G-code's rotary state (A/B/C
+or I/J/K angles) is machine-convention-dependent, while a rotation
+matrix is unambiguous --- the slicer stays agnostic to the robot brand.
+Second, the path semantics here (approach along the surface normal,
+two material families, non-planar layers) do not fit the planar
+G-code model of "layers at fixed Z". Third, RoboDK's offline
+programming model is exactly designed to consume generic pose
+targets and translate them per controller, which removes the need for
+the slicer to know anything about the robot's kinematics.
+
+% ----------------------------------------------------------------------
+\subsection{Example programs}\label{sec:impl-examples}
+% ----------------------------------------------------------------------
+
+The repository ships two executable end-to-end examples
+(\texttt{examples/}), which double as integration tests of the whole
+pipeline:
+
+\begin{itemize}
+  \item \texttt{print\_layers.py}: parses the C-beam APDL model, builds
+        the \texttt{CompositeModel} with its matrix and fiber
+        materials, rotates and lifts the model, loads the fiber CSVs,
+        slices the model into \texttt{SlicedPiece} layers, visualizes
+        two layers (with an exaggerated visual layer spacing for
+        readability --- the real spacing is 0.35\,mm) with the path
+        segments color-coded by type, and exports the piece trajectory
+        with orientations to
+        \texttt{trajectories/piece\_path.txt}.
+  \item \texttt{mold\_generation.py}: same model preparation, then the
+        \texttt{oamc} structural pipeline (compliance evaluation,
+        fiber field computation, RDP downsampling, fiber export to
+        CSV) and the mold branch: shadow-volume generation and
+        slicing into \texttt{SlicedMold} layers, with the mold
+        trajectory export.
+\end{itemize}
+
+Together they demonstrate the intended division of labor:
+\texttt{oamc} decides \emph{where the fibers must go} (structural
+optimization), and \texttt{slicer} decides \emph{how to print them}
+(geometry and trajectories).

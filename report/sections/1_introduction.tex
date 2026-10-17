@@ -1,0 +1,171 @@
+% ======================================================================
+\section{Introduction}\label{sec:intro}
+% ======================================================================
+
+\subsection{Background and motivation}
+
+Fused Deposition Modeling (FDM) is today the most widespread additive
+manufacturing process for thermoplastics. In its standard form, a
+heated nozzle extrudes a continuous filament that is deposited along a
+toolpath, layer by layer, until the part is complete. Virtually every
+commercial FDM machine and every mainstream slicing package
+(Cura, PrusaSlicer, Slic3r, \dots) shares one structural assumption: the
+print head moves on a three-axis Cartesian gantry, the nozzle axis
+stays vertical, and every layer is a \emph{horizontal plane} parallel to
+the build plate. The slicer reduces the solid model to a stack of 2D
+regions; the kinematics of the printer reduces the tool orientation to
+a single fixed pose.
+
+This assumption is a software and kinematics limitation, not a physical
+one. Nothing in the extrusion process requires the nozzle to be
+vertical: material can be deposited on inclined or curved surfaces,
+provided that (i) the tool can be oriented so that its axis is roughly
+perpendicular to the target surface, and (ii) the deposited bead is
+pressed against an existing substrate. A six-degree-of-freedom
+industrial robot arm satisfies requirement (i) by construction: it can
+place and orient an end-effector arbitrarily within its workspace,
+with the repeatability needed for extrusion processes. Removing the
+planar-layer constraint then unlocks concrete benefits:
+
+\begin{itemize}
+  \item \textbf{Elimination of the staircase effect.} Sloped and curved
+        surfaces are no longer approximated by stacked planar slices;
+        layers can follow the actual surface curvature, so the
+        as-printed geometry matches the CAD geometry without the
+        characteristic stair steps of planar printing.
+  \item \textbf{Conformal reinforcement.} Continuous fibers can be laid
+        along the actual load paths of a structural part, on curved
+        surfaces, rather than being discretized into flat slices that
+        cut through the mechanically optimal trajectories.
+  \item \textbf{Printing on / against existing geometry.} A
+        non-planar-capable robot can print support structures that
+        conform to the underside of a part, or deposit material on
+        pre-existing surfaces, which is the basis of hybrid
+        manufacturing.
+\end{itemize}
+
+Realizing these benefits, however, requires a slicer that fundamentally
+does more than a conventional one. A planar slicer only needs to output
+2D coordinates and a feed rate, because the tool orientation is
+constant. A robot-based non-planar slicer must output a complete
+\emph{tool pose} --- position \emph{and} orientation --- at every point
+of the trajectory, must guarantee that the deposited bead stays
+supported by previously deposited material or by the build plate, and
+must handle path topology (connections, gaps, crossings) that planar
+slicers never encounter because they can always "travel" at a fixed
+height.
+
+\subsection{Project scope and objectives}
+
+This project develops such a slicer: a Python software package, called
+\texttt{slicer}, that transforms a structural finite-element model into
+full six-DoF printing trajectories, ready to be simulated and executed
+on a robotic cell. The application domain is the FDM printing of
+\emph{continuous-fiber composite} parts: the target objects are
+load-bearing structural components (the running example is a thin
+C-beam) in which stiff carbon-fiber tows are embedded in a
+thermoplastic matrix, and whose fiber layout is determined by a
+structural optimization (compliance minimization) performed upstream.
+
+Concretely, the slicer must:
+
+\begin{enumerate}
+  \item \textbf{Slice a solid model into non-planar layers} ---
+        each layer is an isosurface of a scalar field defined on the
+        volumetric mesh, so that layers naturally follow the curved
+        geometry of thin-walled structural parts.
+  \item \textbf{Generate the infill of each layer, aligned with the
+        fiber trajectories} deposited inside that layer. This is the
+        central mechanical requirement: the matrix material must support
+        the fibers, and the fiber direction controls the local
+        stiffness of the printed composite.
+  \item \textbf{Generate contour shells} (offset perimeter passes) at a
+        nozzle-width scale, on every layer, for both the part and its
+        support structure.
+  \item \textbf{Automatically generate a support structure (mold)}
+        underneath the overhanging regions of the part, by computing a
+        "shadow volume" and slicing it into printable layers with a
+        grid infill, including the handling of infill crossings so
+        that no bead is deposited twice.
+  \item \textbf{Assemble every layer's curves into a continuous,
+        physical printing path}: order the curves, connect them when the
+        connection is short and legitimate, and insert perpendicular
+        approach/leave moves when it is not.
+  \item \textbf{Compute a full tool pose (rotation matrix) at every
+        trajectory point} --- approach axis, travel axis and their
+        cross product --- so that the exported trajectory can drive a
+        six-axis robot.
+  \item \textbf{Export the complete multi-layer trajectory} to a
+        plain-text format that an external robot simulator (RoboDK) can
+        ingest directly.
+\end{enumerate}
+
+\subsection{Inputs and outputs of the pipeline}
+
+The slicer operates within a larger tool chain built around the
+\texttt{oamc} library (Optimization of Anisotropic Material with
+Continuous fibers). The data flow is:
+
+\begin{itemize}
+  \item \textbf{Input: an APDL (ANSYS) finite-element model}, parsed by
+        \texttt{oamc.integrations.ansys.parser.APDLParser}. The model
+        contains (a) a volumetric solid mesh of the part (linear
+        tetrahedra, hexahedra, or their quadratic variants), (b) a
+        named surface mesh \texttt{"MOLD"} describing the surface the
+        part will be printed against, and (c) boundary conditions and
+        material data (an isotropic matrix material and a transversely
+        isotropic fiber material).
+  \item \textbf{Input: fiber paths.} For each layer, a set of
+        continuous fiber trajectories (polylines in 3D), either
+        computed by the structural optimization of \texttt{oamc}
+        (\texttt{model.compute\_fibers}) and saved as CSV files, or
+        provided directly. Each file \texttt{fiber\_<layer>\_<i>.csv}
+        contains one polyline; the slicer loads them per layer.
+  \item \textbf{Output: printing trajectories.} One text file for the
+        part, one for the mold, each containing, line by line, every
+        trajectory point with its Cartesian coordinates, the nine
+        components of its tool-orientation matrix, a segment-type label
+        and the layer index.
+\end{itemize}
+
+The pipeline is deliberately kept as a pure geometry/trajjectory
+generator: it does not simulate the robot, check collisions, or compute
+extrusion rates. Those responsibilities belong to the downstream robot
+simulator. This separation keeps the slicer generic (any six-DoF cell
+can consume its output) and testable (the output format is trivially
+inspectable).
+
+\subsection{Software ecosystem}
+
+Three open-source libraries carry the computational load:
+
+\begin{itemize}
+  \item \textbf{PyVista} \cite{pyvista}, a Pythonic interface to the
+        Visualization Toolkit (VTK) \cite{vtk}. Every geometric
+        operation of the slicer --- isosurface extraction, scalar-field
+        clipping, contouring, slicing, feature-edge extraction, Delaunay
+        triangulation, convex hulls, point merging --- is a VTK filter
+        exposed by PyVista. This choice is central to the project: the
+        whole slicing machinery reduces to compositions of
+        well-tested, C++-implemented mesh filters, called from Python.
+  \item \textbf{NumPy} for all array-level mathematics, and
+        \textbf{SciPy} \cite{scipy} for spatial indexing
+        (\texttt{cKDTree}), convex hulls (\texttt{ConvexHull}), Delaunay
+        triangulation (\texttt{Delaunay}) and rotations
+        (\texttt{spatial.transform.Rotation}).
+  \item \textbf{RoboDK} \cite{robodk} as the downstream consumer of the
+        exported trajectories, for offline programming and simulation of
+        the robot cell.
+\end{itemize}
+
+\subsection{Report organization}
+
+The report is organized as follows.
+Chapter~\ref{sec:literature} reviews the state of the art of non-planar
+slicing and multi-axis printing. Chapter~\ref{sec:methodology} presents
+the methodology: the complete algorithm, stage by stage, from model
+orientation to trajectory export, with the underlying mathematics.
+Chapter~\ref{sec:implementation} details the Python implementation:
+the class architecture, the role of each module and method, the
+performance engineering, and the connection to RoboDK.
+Chapter~\ref{sec:results} presents results (to be completed).

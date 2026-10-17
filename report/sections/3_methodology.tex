@@ -1,0 +1,620 @@
+% ======================================================================
+\section{Methodology}\label{sec:methodology}
+% ======================================================================
+
+This chapter describes the slicing algorithm as a sequence of
+computational stages. Each stage is first motivated by the physical or
+robotic requirement it serves, then formalized, and finally discussed
+in terms of design decisions and edge cases. The Python realization of
+each stage is described in Chapter~\ref{sec:implementation}.
+
+Figure~\ref{fig:pipeline} gives the global picture. The pipeline has two
+branches that share the same downstream machinery:
+
+\begin{itemize}
+  \item the \textbf{piece branch}: the structural part itself, sliced
+        into non-planar layers with fiber-aligned infill;
+  \item the \textbf{mold branch}: an automatically generated support
+        structure printed before (underneath) the part, sliced into
+        near-planar layers with a grid infill.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\fbox{\parbox{0.92\textwidth}{\centering\vspace{2em}
+\textbf{Input:} APDL model (solid mesh + mold surface) + fiber paths (CSV)\\[0.6em]
+$\downarrow$\\
+\textbf{Stage 1:} model orientation (mean-normal alignment with $+Z$) and lifting\\[0.4em]
+$\downarrow$ \hspace{5em} $\downarrow$\\
+\textbf{Stage 2:} piece slicing \hspace{2em} \textbf{Stage 2':} shadow volume $\to$ mold slicing\\
+(isosurfaces of $q$) \hspace{2.6em} (cone / vertical projection, then $q$-slicing)\\[0.4em]
+$\downarrow$ \hspace{5em} $\downarrow$\\
+\textbf{Stage 3:} shells + infill per layer (dist-to-boundary field; fiber-aligned planes / fixed XY grid)\\[0.4em]
+$\downarrow$\\
+\textbf{Stage 4:} path stitching (greedy nearest-endpoint, bounded connections, blockers)\\[0.4em]
+$\downarrow$\\
+\textbf{Stage 5:} tool-pose computation (normal + tangent $\to$ orthonormal frame)\\[0.4em]
+$\downarrow$\\
+\textbf{Stage 6:} simplification (RDP / infill collapse) and multi-layer text export\\[0.6em]
+\textbf{Output:} trajectory files for RoboDK
+\vspace{2em}}}
+\caption{Global structure of the slicing pipeline.}
+\label{fig:pipeline}
+\end{figure}
+
+% ----------------------------------------------------------------------
+\subsection{Model preparation: orientation and lifting}\label{sec:meth-orient}
+% ----------------------------------------------------------------------
+
+The printing process assumes a dominant build direction: the robot
+approaches the part from "above" ($+Z$), and the mold is grown
+"downward" from the part's underside onto the printing plane
+$Z = z_{\mathrm{plane}}$. A structural model, however, arrives in an
+arbitrary orientation in the global frame of the finite-element model.
+
+\subsubsection{Mean-normal estimation and rotation}
+
+The first step therefore estimates the model's natural build direction
+and aligns it with $+Z$. The natural build direction is taken to be the
+mean of the normals of all layer surfaces of the part. Writing
+$\mathcal{S}_k$ for the $k$-th layer surface (their computation is
+described in \S\ref{sec:meth-slicing}) and $\mathbf{n}_{k,j}$ for the
+unit normal of cell $j$ of $\mathcal{S}_k$, the mean normal is the
+surface-area-weighted-free average
+\begin{equation}
+  \bar{\mathbf{n}} \;=\; \frac{1}{N_{\mathrm{cells}}}
+  \sum_{k} \sum_{j} \mathbf{n}_{k,j},
+  \qquad N_{\mathrm{cells}} = \sum_k |\mathcal{S}_k|.
+\end{equation}
+The slicer then builds the rotation matrix $R \in SO(3)$ that maps
+$-\bar{\mathbf{n}}$ onto $\mathbf{e}_z = (0,0,1)$:
+\begin{equation}
+  R = \exp\!\big(\theta\, [\mathbf{a}]_\times\big),
+  \qquad
+  \mathbf{a} = \frac{\bar{\mathbf{n}} \times \mathbf{e}_z}{\|\bar{\mathbf{n}} \times \mathbf{e}_z\|},
+  \quad
+  \theta = \arccos\!\big(\bar{\mathbf{n}} \cdot \mathbf{e}_z\big),
+\end{equation}
+with the degenerate case $\bar{\mathbf{n}} \parallel \mathbf{e}_z$
+resolved by $R = I$. The rotation is applied \emph{in place} to all
+mesh data of the model: the solid-mesh nodes, the mold mesh, its
+Kd-tree, and its PolyData representation, so that every downstream
+consumer sees a consistently rotated model.
+
+\subsubsection{Lifting}
+
+After rotation, the model is translated along $+Z$ by an offset so
+that its lowest printed surface lies above the printing plane,
+leaving room for the support structure. This is a pure translation of
+the same data structures, again applied in place.
+
+% ----------------------------------------------------------------------
+\subsection{Piece slicing: layers as isosurfaces}\label{sec:meth-slicing}
+% ----------------------------------------------------------------------
+
+\subsubsection{Why isosurfaces}
+
+A planar slicer intersects the solid with planes
+$z = z_0 + k h$. The generalization adopted here replaces the planes
+with the level sets of a scalar field $q$ defined over the volumetric
+mesh. The field is chosen such that $q$ is (proportional to) the
+signed distance along the local build direction, so that consecutive
+integer values of $q$ are one layer height $h$ apart:
+\begin{equation}
+  \mathcal{S}_k \;=\; \{\,\mathbf{p} \in \mathcal{V} \;:\; q(\mathbf{p}) = q_k\,\},
+  \qquad q_{k+1} - q_k = h \ \text{(in physical units)}.
+\end{equation}
+For a thin-walled part, the isosurfaces of $q$ follow the wall's
+mid-surface: the layers are \emph{curved}, and the nozzle deposits
+material conformally to the wall. The scalar field itself is produced
+upstream by the \texttt{oamc} layer-initialization stage
+(\texttt{model.init\_q()}); the slicer only consumes the field named
+\texttt{"q"} stored on the volumetric grid, and extracts the level
+surfaces with the VTK contour filter.
+
+\subsubsection{Practical extraction}
+
+Each layer surface is extracted with a single contour call on the
+unstructured grid, at the level $q_k$. Two properties of the extracted
+surface matter for everything downstream:
+
+\begin{itemize}
+  \item \textbf{Boundaries.} The isosurface of an open wall is an open
+        surface: it has boundary edges (where the contour leaves the
+        volume's boundary). These boundary curves are the reference for
+        all shell offsets (\S\ref{sec:meth-shells}).
+  \item \textbf{Duplicate points.} The contour filter can emit
+        duplicate points along the surface boundary, which silently
+        corrupts feature-edge detection. The slicer therefore merges
+        coincident points (\emph{merge points}, tolerance typically
+        0.1\,mm) as the first operation of the path-building stage.
+        Because point indexing changes after the merge, every cached
+        geometric quantity (normals, distance fields) is invalidated at
+        that moment --- the class architecture handles this explicitly
+        (see \S\ref{sec:impl-object}).
+\end{itemize}
+
+% ----------------------------------------------------------------------
+\subsection{The distance-to-boundary field and contour shells}
+\label{sec:meth-shells}
+% ----------------------------------------------------------------------
+
+\subsubsection{Distance field}
+
+Let $\mathcal{S}$ be one layer surface with point set
+$P = \{\mathbf{p}_i\}$ and boundary point set
+$B \subset P$ (the points belonging to feature/boundary edges). For
+every surface point we define
+\begin{equation}
+  d(\mathbf{p}) \;=\; \min_{\mathbf{b} \in B} \|\mathbf{p} - \mathbf{b}\|_2,
+\end{equation}
+the geodesic-free (Euclidean) distance to the layer boundary. The field
+is computed exactly with a Kd-tree built on $B$: one parallel
+nearest-neighbor query ($O(|P| \log |B|)$) returns all distances at
+once. The field is stored as the point-data array
+\texttt{dist\_to\_boundary} on the surface, so that all subsequent
+VTK scalar-field filters operate on it natively.
+
+\subsubsection{Contour shells}
+
+The shells are the isolines of $d$ inside the layer:
+\begin{equation}
+  \mathcal{C}_c \;=\; \{\,\mathbf{p} \in \mathcal{S} \;:\; d(\mathbf{p}) = c\,\},
+  \qquad c \in \{c_1 < c_2 < \dots\}.
+\end{equation}
+For the piece, the isovalues are multiples of half a nozzle width
+(e.g.\ $c \in \{0.5, 1.0, \dots\}$\,mm with a 0.7\,mm nozzle), giving
+perimeter passes at successively larger offsets from the layer edge.
+The contour filter produces the isolines; a chaining step then
+reconstructs ordered polylines from the filter's segment soup
+(\S\ref{sec:meth-chaining}).
+
+\subsubsection{Inner zone and offset surfaces}
+
+The infill must not collide with the shells: it is generated only in
+the \emph{inner zone}
+\begin{equation}
+  \mathcal{Z}_{\mathrm{in}} \;=\; \{\,\mathbf{p} \in \mathcal{S} \;:\; d(\mathbf{p}) \ge c_{\max}\,\},
+\end{equation}
+where $c_{\max}$ is the largest shell isovalue (the \emph{contour
+width}). The zone is obtained by scalar clipping: the VTK clip filter
+cuts the surface along the isovalue $c_{\max}$ and re-triangulates the
+cut cells, so the boundary of $\mathcal{Z}_{\mathrm{in}}$ lies exactly
+on the isoline. (Care with conventions is required: in PyVista's
+\texttt{clip\_scalar}, the \texttt{invert} flag selects which side is
+kept; the slicer documents explicitly that
+\texttt{invert=False} keeps $d \ge c_{\max}$.)
+
+% ----------------------------------------------------------------------
+\subsection{Fiber direction and fiber-aligned infill planes}
+\label{sec:meth-fibers}
+% ----------------------------------------------------------------------
+
+\subsubsection{Mean fiber direction by uncentered PCA}
+
+Each layer carries a set of fiber polylines
+$F = \{f_i\}$, each $f_i$ being a sequence of 3D points. The local
+stiffness of the printed composite is dominated by the fiber
+direction, so the matrix infill must be organized \emph{around} the
+fibers. The slicer first estimates the dominant fiber direction of the
+layer:
+
+\begin{itemize}
+  \item collect the unit direction vectors of every fiber segment,
+        skipping zero-length segments:
+        $\mathbf{u}_{ij} = (f_i^{j+1} - f_i^j)/\|f_i^{j+1} - f_i^j\|$;
+  \item build the uncentered second-moment matrix
+        $M = \sum_{i,j} \mathbf{u}_{ij}\mathbf{u}_{ij}^\top$;
+  \item the mean direction is the dominant eigenvector of $M$ (largest
+        eigenvalue).
+\end{itemize}
+
+The absence of centering is deliberate and important: a centered PCA
+of a bundle of nearly parallel directions would return the axis of
+greatest \emph{scatter}, i.e.\ a direction \emph{perpendicular} to the
+fibers. The uncentered moment matrix instead has its dominant
+eigenvector aligned with the bundle. The sign of the eigenvector is
+fixed deterministically (largest-magnitude component positive) so that
+the plane generation is reproducible.
+
+\subsubsection{Infill plane family}
+
+Within the layer surface (of mean unit normal $\mathbf{n}$), the
+infill direction is set at $\pm 45^\circ$ from the fiber direction
+$\mathbf{d}_f$, alternating with the parity of the layer index:
+\begin{equation}
+  \mathbf{d}_{\pm} \;=\;
+  \cos 45^\circ \, \mathbf{d}_f \;\pm\;
+  \sin 45^\circ \, (\mathbf{n} \times \mathbf{d}_f),
+\end{equation}
+normalized. The alternation gives a cross-ply-like stacking of
+successive layers, which balances the bending/torsional stiffness of
+the laminate. The infill lines themselves are the intersections of
+$\mathcal{Z}_{\mathrm{in}}$ with a family of \emph{parallel planes}
+\begin{equation}
+  \Pi_s \;=\; \{\,\mathbf{p} : (\mathbf{p} - \mathbf{o}) \cdot \mathbf{m} = s\,\},
+  \qquad \mathbf{m} = \mathbf{n} \times \mathbf{d}_\pm,
+\end{equation}
+spaced by the infill spacing $s_{\mathrm{step}}$ (typically 0.5\,mm
+for the piece), centered on the projected extent of the inner zone
+with a half-step margin so the extreme planes fully bracket the zone.
+
+% ----------------------------------------------------------------------
+\subsection{Mold generation: shadow volumes}\label{sec:meth-shadow}
+% ----------------------------------------------------------------------
+
+The part must be printed on a support structure ("mold") that
+(a) reaches from the printing plane $Z = z_{\mathrm{plane}}$ up to the
+part's lower surface, (b) does not intersect the part, and (c) is
+itself printable. The slicer constructs the mold as the
+\emph{shadow volume} of the part's lower surface with respect to the
+build direction. Three constructions are implemented; all operate on
+the part's linearized outer surface (the triangulated skin of the
+solid mesh) and all produce a volumetric wedge mesh connecting a "top"
+point set (on or near the part) to a "bottom" point set (on the
+plane or on the part itself).
+
+\subsubsection{Direct projection}
+
+Every point of the part's downward-facing surface
+($\mathbf{n}\cdot\mathbf{e}_z < 0$) is projected vertically onto the
+plane. The volume is the set of prisms/wedges between each surface
+triangle and its vertical projection. This is the fastest method but
+builds material even where the part does not overhang (e.g.\ inside
+closed cavities facing up).
+
+\subsubsection{Cone of rays}
+
+For each downward-facing triangle, a cone of rays is cast from its
+centroid (offset outward along its normal by a small
+\texttt{offset\_faces} to avoid self-intersection): one central
+vertical ray and \texttt{no\_rays} rays tilted by the half-angle
+\texttt{cone\_angle}, uniformly distributed in azimuth
+(\texttt{start\_phase} controlling the rotation of the cone). A
+(face, ray) pair is \emph{free} if the ray reaches the printing plane
+without intersecting the part's surface. For every free pair, the mold
+top point is the (offset) centroid and the mold bottom point is the
+ray's intersection with the plane --- so the mold's side walls follow
+the cone's slope, giving a self-supporting draft angle. The top points
+are triangulated by a 2D Delaunay triangulation of their $XY$
+projections, and the wedge volume is built on these triangles.
+
+Faces whose centroid projects too close to the part's silhouette (the
+convex hull of the $XY$ projection) are discarded
+(\texttt{distance\_from\_contour}), which keeps the mold's rim clean.
+
+\subsubsection{Vertical projection with occlusion}
+
+The most physically accurate variant: each \emph{node} of the
+lower surface is projected vertically; if the vertical segment from the
+node to the plane crosses the part (which happens for nodes below
+overhangs, e.g.\ inside the concavity of a C-beam), the bottom point
+is the \emph{first intersection} with the part instead of the plane.
+The volume therefore fills the gap between the lower surface and the
+nearest surface below it (part or plane). A prism-validity test then
+discards the triangles whose extrusion would intersect the part: the
+segment between the triangle's top centroid and bottom centroid is
+ray-cast against the upward-facing part surface, and any real
+intersection inside the segment's height range invalidates the prism.
+
+\subsubsection{Wedge volume assembly}
+
+All three methods share the same volume builder: given top points
+$\mathbf{t}_i$, bottom points $\mathbf{b}_i$ and triangles
+$(a_j, b_j, c_j)$ of the top surface, the volume is the set of
+tetrahedralized wedges connecting each triangle
+$(\mathbf{t}_{a}, \mathbf{t}_{b}, \mathbf{t}_{c})$ to its projected
+triangle $(\mathbf{b}_{a}, \mathbf{b}_{b}, \mathbf{b}_{c})$. The
+result is a \texttt{pv.UnstructuredGrid} of tetrahedra, ready for the
+same contour-based slicing as the part.
+
+% ----------------------------------------------------------------------
+\subsection{Mold slicing and fixed infill grid}\label{sec:meth-moldslice}
+% ----------------------------------------------------------------------
+
+The shadow volume is sliced by the simple planar field
+\begin{equation}
+  q(\mathbf{p}) = \frac{z(\mathbf{p}) - z_{\mathrm{plane}}}{h},
+\end{equation}
+so that layer $k$ is the horizontal slice at altitude
+$z_{\mathrm{plane}} + k\,h$. For each layer, the pipeline computes:
+
+\begin{enumerate}
+  \item \textbf{The layer surface}: the isosurface $q = k$, triangulated
+        and with point normals.
+  \item \textbf{The distance-to-part field}
+        $\mathrm{dist\_to\_part}(\mathbf{p}) = \min\!\big(
+        \mathrm{dist}(\mathbf{p}, \text{part surface}),
+        \ z(\mathbf{p}) - z_{\mathrm{plane}} \big)$.
+        The distance to the (triangulated) part surface is obtained
+        with an implicit-distance computation; the minimum with the
+        height above the plane closes the field inside cavities, where
+        the nearest reference is the build plate rather than a far
+        wall of the part.
+  \item \textbf{Contour shells}: the isolines of
+        $\mathrm{dist\_to\_part}$ at the shell isovalues
+        $(i + \tfrac12)\, d_{\mathrm{nozzle}}$, giving two shells
+        offset from both the part (above the mold) and the free rim
+        of the layer.
+  \item \textbf{The inner zone}: the clip
+        $\mathrm{dist\_to\_part} \ge n_{\mathrm{shells}}\,
+        d_{\mathrm{nozzle}}$.
+  \item \textbf{The grid infill}: the intersections of the inner zone
+        with the two families of planes $x = x_i$ and $y = y_j$.
+\end{enumerate}
+
+\paragraph{Fixed infill levels.}
+A subtle but decisive detail: the infill plane positions
+$\{x_i\}$, $\{y_j\}$ are computed \textbf{once, from the footprint of
+layer zero}, and reused for every layer. If each layer used its own
+extent, the planes would shift with the shrinking/growing cross-section
+of the mold and the beads would not stack vertically --- the printed
+wall would be a lattice of misaligned segments instead of continuous
+vertical ribs. With fixed levels, each infill line of layer $k$ lies
+exactly on top of the corresponding line of layer $k-1$.
+
+\paragraph{Infill spacing.}
+For a two-direction grid in which crossings are printed once, the
+area fraction covered by beads of width $w$ spaced by $s$ is
+$2w/s - (w/s)^2$ (inclusion--exclusion), hence the spacing for a target
+fraction $r$:
+\begin{equation}
+  s \;=\; \frac{w}{1 - \sqrt{1 - r}}.
+\end{equation}
+A 100\% infill gives $s = w$ (adjacent beads), 20\% gives
+$s \approx 4.9\,w$.
+
+% ----------------------------------------------------------------------
+\subsection{Segment chaining}\label{sec:meth-chaining}
+% ----------------------------------------------------------------------
+
+Both contour filters (isolines of a scalar field) and plane cuts emit
+unordered sets of 2-point line segments. The path logic requires
+\emph{ordered polylines}. The slicer chains segments with an explicit
+graph traversal rather than relying on VTK's stripper, which was
+observed to leave multi-level contour output fragmented:
+
+\begin{itemize}
+  \item merge coincident points of the segment soup;
+  \item compute the degree of every point; if any point has degree
+        $> 2$ (a junction), the graph is not a set of simple chains and
+        the chaining is abandoned in favor of a slower, more general
+        fallback (one slice call per plane);
+  \item otherwise build, for each point, its (at most two) neighbors;
+  \item walk every open chain from its degree-1 endpoint, and every
+        closed loop from any unvisited degree-2 point (the loop is
+        closed explicitly by repeating its first point).
+\end{itemize}
+
+The complexity is linear in the number of segments, and the walk
+naturally preserves the original sampling of the isolines.
+
+% ----------------------------------------------------------------------
+\subsection{Infill crossing management (mold)}\label{sec:meth-crossings}
+% ----------------------------------------------------------------------
+
+In a grid infill, the primary and secondary families cross each other.
+If both were printed fully, every crossing would be deposited twice
+(the second pass would melt/cut through the first bead). The mold
+algorithm therefore distinguishes, per layer, a \textbf{primary}
+direction (X on even layers, Y on odd layers) from a
+\textbf{secondary} direction:
+
+\begin{itemize}
+  \item primary lines are printed \emph{continuously};
+  \item every secondary line is \textbf{cut at each intersection} with
+        a primary line, removing a curvilinear zone of one nozzle
+        diameter around the crossing point (half a nozzle width on
+        each side), so that the secondary beads approach but never
+        overlap the primary beads.
+\end{itemize}
+
+The intersections are computed in 2D (XY) between the polyline
+segments: for a secondary segment $[\mathbf{p}_1, \mathbf{p}_2]$ and a
+primary segment $[\mathbf{q}_1, \mathbf{q}_2]$, the parameters
+$(t, u)$ of the intersection solve the $2 \times 2$ cross-product
+system
+\begin{equation}
+  \begin{cases}
+    \mathbf{p}_1 + t\,\mathbf{d}_1 \equiv \mathbf{q}_1 + u\,\mathbf{d}_2 \quad (\text{in } XY)\\
+    \mathbf{d}_1 = \mathbf{p}_2 - \mathbf{p}_1,\quad
+    \mathbf{d}_2 = \mathbf{q}_2 - \mathbf{q}_1
+  \end{cases}
+\end{equation}
+and an intersection exists iff $t, u \in [0,1]$ and the segments are
+not parallel. The cut positions are converted to curvilinear
+abscissae along the secondary polyline, sorted, merged when
+overlapping, and the polyline is split into the surviving
+sub-polylines, with exact interpolation of the cut endpoints.
+
+A spatial index (Kd-tree on segment midpoints) restricts the pairwise
+tests to segments that are close enough to intersect, turning the
+naive $O(NM)$ test into an output-sensitive computation.
+
+\subsubsection{Crossing blocker}
+
+Cutting the secondary lines is not sufficient: the \emph{stitching}
+stage (\S\ref{sec:meth-stitching}) may connect the end of one line to
+the start of the next with a straight printed move that happens to
+cross a primary line --- printing the crossing a second time from
+above. The mold path builder therefore attaches a
+\textbf{connection blocker} to the stitching algorithm: a callable
+that tests the candidate connection segment against all primary
+segments with the same 2D intersection test, and forbids the
+connection when a crossing is detected. A forbidden connection is
+replaced by a leave + approach pair (travel moves), exactly like a
+too-long connection.
+
+% ----------------------------------------------------------------------
+\subsection{Path stitching}\label{sec:meth-stitching}
+% ----------------------------------------------------------------------
+
+Each layer yields a set of curves (shells, infill lines) that must be
+printed in a single robotic sequence. The slicer stitches them into
+one or several \emph{sub-paths} with the following semantics:
+
+\begin{itemize}
+  \item a \textbf{curve} is printed;
+  \item a \textbf{connection} is a printed straight move from the end
+        of one curve to the start of the next, allowed only if it is
+        shorter than a maximum length
+        (geometrically derived: the diagonal between two adjacent
+        infill lines, $\sqrt{s^2 + h^2}$, times a safety margin) and
+        not forbidden by a blocker;
+  \item an \textbf{approach} is a travel move (not printed) arriving
+        at the start of a sub-path, along the local surface normal,
+        at distance \texttt{approach\_distance};
+  \item a \textbf{leave} is the symmetric travel move leaving the end
+        of a sub-path.
+\end{itemize}
+
+\subsubsection{Greedy nearest-endpoint algorithm}
+
+The stitching is a greedy loop over an \emph{endpoint table}: for $N$
+curves, a $(2N \times 3)$ array holding the first and last point of
+each curve, with an activity mask. Starting from a chosen first curve
+(optionally reversed), the loop repeatedly:
+
+\begin{enumerate}
+  \item computes the (squared, vectorized) distance from the current
+        endpoint to all \emph{active} endpoints;
+  \item selects the nearest one, identifies its curve and whether the
+        nearest point is the curve's end (in which case the curve is
+        consumed in reverse);
+  \item checks the connection: length and blocker. If legitimate, a
+        connection segment is emitted; otherwise the current sub-path is
+        closed (leave move) and a new sub-path is opened (approach
+        move) at the chosen curve;
+  \item consumes the chosen curve, marks its endpoints inactive, and
+        repeats until no curve remains.
+\end{enumerate}
+
+The final endpoint gets a leave move. Each approach/leave move is
+oriented along the \emph{local surface normal} at the corresponding
+curve endpoint, so the tool always arrives at and departs from the
+surface perpendicularly --- the same direction it will print in.
+
+\subsubsection{Segment codes}
+
+Every segment of the stitched path carries a type and a command code,
+kept distinct between the two material systems of the composite part:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Move & Pure (matrix / shells) & Composite (fiber / infill) \\
+\midrule
+Continuation along a curve & 2 & 0 \\
+End of a connection & 3 & 1 \\
+Approach (start of sub-path) & 5 & 4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The piece path is built as two fully independent passes --- pure
+curves (shells) then composite curves (fiber-aligned infill) --- which
+are concatenated in the export. This models the physical process:
+the matrix and the fiber tows are deposited by different tool states,
+and the robot must finish all matrix material of one family before
+switching.
+
+% ----------------------------------------------------------------------
+\subsection{Tool-pose computation}\label{sec:meth-frames}
+% ----------------------------------------------------------------------
+
+A six-DoF robot needs a full orientation at every trajectory point,
+not just a position. The slicer defines the tool frame from two
+vector fields along the path:
+
+\begin{itemize}
+  \item the \textbf{approach normal} $\mathbf{n}(\mathbf{p})$: the unit
+        normal of the surface cell closest to $\mathbf{p}$;
+  \item the \textbf{travel tangent} $\mathbf{t}(\mathbf{p})$: the unit
+        tangent to the trajectory (central difference at interior
+        points, one-sided difference at segment endpoints).
+\end{itemize}
+
+The orthonormal frame is then built by Gram--Schmidt:
+\begin{equation}
+  \mathbf{z} = -\mathbf{n} \ (\text{tool axis pointing into the surface}),
+  \quad
+  \mathbf{x} = \frac{\mathbf{t} - (\mathbf{t}\cdot\mathbf{z})\,\mathbf{z}}
+                     {\|\mathbf{t} - (\mathbf{t}\cdot\mathbf{z})\,\mathbf{z}\|},
+  \quad
+  \mathbf{y} = \mathbf{z} \times \mathbf{x},
+\end{equation}
+so that $(\mathbf{x}, \mathbf{y}, \mathbf{z})$ is a right-handed basis,
+$\mathbf{x}$ the direction of travel and $\mathbf{z}$ the approach
+axis. The degenerate case $\mathbf{t} \parallel \mathbf{z}$ (exactly
+the case of approach/leave moves, which travel along the normal) is
+handled by an arbitrary perpendicular fallback, since travel
+direction carries no meaningful orientation information there.
+
+Two aspects deserve emphasis. First, the tool is \emph{not}
+rotationally symmetric about its approach axis: the choice of
+$\mathbf{x}$ fixes the tool's rotation about its own axis, and getting
+it wrong can mean the tool body colliding with the part even when the
+approach axis is correct. Second, the \textbf{mold redefines the
+approach normal}: for support material, the natural approach direction
+is perpendicular to the \emph{part surface} the support is printed
+against, not to the support layer's own surface. The mold class
+therefore overrides the normal lookup to sample the part's surface
+normals instead --- one of the two places where the class hierarchy
+changes behavior rather than merely adding it.
+
+Tangents are computed independently within each segment, so a small
+discontinuity in the frame's $\mathbf{x}$ axis can occur exactly at a
+segment boundary (curve $\to$ connection): only the rotation of the
+tool about its approach axis is affected, never the position, and the
+robot interpolates smoothly over it.
+
+% ----------------------------------------------------------------------
+\subsection{Polyline simplification}\label{sec:meth-simplify}
+% ----------------------------------------------------------------------
+
+Raw isolines can contain thousands of nearly collinear points. The
+export stage offers two levels of simplification:
+
+\begin{itemize}
+  \item \textbf{Ramer--Douglas--Peucker (RDP)} \cite{rdp}, implemented
+        iteratively (explicit stack, no recursion) and directly in 3D:
+        the perpendicular distance of each candidate point to the
+        current 3D chord is computed exactly; points are kept as long
+        as the maximum deviation exceeds the tolerance. Endpoints are
+        always kept, and simplification is applied per segment, so
+        distinct segments are never merged.
+  \item \textbf{Infill collapse} (mold): a mold infill line is, in the
+        normal case, the intersection of a planar layer with a plane
+        $x = \text{const}$ or $y = \text{const}$ --- a straight line.
+        It can therefore be reduced to its two endpoints, shrinking
+        the trajectory file by orders of magnitude. A safety net
+        guards this collapse: the line is flattened only if every
+        point lies within a tolerance of the endpoint chord \emph{and}
+        the points progress monotonically along the chord. A line that
+        doubles back (contains a printed jump) is left untouched, and
+        a merely curved line falls back to RDP; no gap is ever erased.
+\end{itemize}
+
+% ----------------------------------------------------------------------
+\subsection{Trajectory export}\label{sec:meth-export}
+% ----------------------------------------------------------------------
+
+The final trajectory is a plain-text table, one row per trajectory
+point:
+\begin{center}
+\texttt{x y z ux uy uz vx vy vz wx wy wz type [layer]}
+\end{center}
+where $(u\!\cdot\!\cdot, v\!\cdot\!\cdot, w\!\cdot\!\cdot)$ are the
+three columns of the rotation matrix $R$ (the tool's X, Y and Z axes
+in world coordinates), \texttt{type} is the segment label
+(\texttt{approach}, \texttt{curve}, \texttt{connection},
+\texttt{leave}) and \texttt{layer} the layer index. A small
+post-processing drops the duplicated point at each segment junction
+(consecutive segments share one point). Multi-layer export writes the
+header once and appends every subsequent layer to the same file, in
+print order.
+
+This format is deliberately minimal and self-describing: building the
+$4\times 4$ pose matrix on the receiving end is a reshape, and the
+type labels let the robot-side post-processor map moves to printed /
+travel motions and select the deposition tool state.

@@ -1,0 +1,52 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black, citecolor=blue!60!black}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!45!black}\itshape,
+  stringstyle=\color{red!60!black},
+  frame=single,
+  breaklines=true,
+  captionpos=b,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  showstringspaces=false,
+}
+
+\title{A Non-Planar Slicer for Robot-Based FDM Printing\\of Continuous-Fiber Composites}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\input{sections/1_introduction}
+\input{sections/2_literature}
+\input{sections/3_methodology}
+\input{sections/4_implementation}
+\input{sections/5_results}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+  \bibitem{pyvista} The PyVista Developers, \emph{PyVista: 3D plotting and mesh analysis through a streamlined, VTK-based interface}, \url{https://docs.pyvista.org}.
+  \bibitem{vtk} Kitware, \emph{The Visualization Toolkit (VTK)}, \url{https://vtk.org}.
+  \bibitem{scipy} P.~Virtanen et al., \emph{SciPy 1.0: Fundamental Algorithms for Scientific Computing in Python}, Nature Methods 17 (2020).
+  \bibitem{rdp} D.~Douglas and T.~Peucker, \emph{Algorithms for the reduction of the number of points required to represent a digitized line or its caricature}, Cartographica 10(2), 1973.
+  \bibitem{robodk} RoboDK, \emph{RoboDK documentation}, \url{https://robodk.com/doc}.
+\end{thebibliography}
+
+\end{document}
