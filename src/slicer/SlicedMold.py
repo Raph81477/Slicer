@@ -1544,7 +1544,8 @@ class SlicedMold(SlicedObject):
         """
         Build the full support printing path for every given layer and
         write the whole trajectory (all layers, in order) to a single
-        text file, ready to be loaded by an external trajectory simulator
+        plain-text (whitespace-separated) file, ready to be loaded by an
+        external trajectory simulator
         such as RoboDK.
 
         Mold-specific simplification (recommended over simplify_tolerance):

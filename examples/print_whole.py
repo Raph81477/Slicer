@@ -266,8 +266,8 @@ def export_plastic(
     simplify_tolerance: float | None = None,
 ) -> None:
     """Export the plastic printing paths of every layer to a single
-    trajectory file (x y z nx ny nz type layer per row, see
-    SlicedPiece.export_layers_to_txt), in the same (already rotated and
+    trajectory file (x,y,z,nx,ny,nz,type,layer per row, see
+    SlicedPiece.export_layers_to_csv), in the same (already rotated and
     lifted) frame as the transformed fibers. The model itself has already
     been rotated and lifted in place by build_model."""
     fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
@@ -276,7 +276,7 @@ def export_plastic(
     if n_layers is not None:
         pieces = pieces[:n_layers]
 
-    SlicedPiece.export_layers_to_txt(
+    SlicedPiece.export_layers_to_csv(
         pieces,
         out_file,
         contour_width=3.0,
@@ -361,11 +361,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plastic-out",
         type=Path,
-        default=DIR / "piece_path.txt",
+        default=DIR / "piece_path.csv",
         help=(
-            "Output file for the plastic trajectory, "
-            "'x y z nx ny nz type layer' per row "
-            f"(default: {DIR / 'piece_path.txt'})."
+            "Output CSV file for the plastic trajectory, "
+            "'x,y,z,nx,ny,nz,type,layer' per row "
+            f"(default: {DIR / 'piece_path.csv'})."
         ),
     )
     parser.add_argument(

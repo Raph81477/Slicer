@@ -5,7 +5,7 @@ Units: mm. The HORST KRL calls (horst_*, bosch_retract, reset_sps) only appear i
 exported .src file, not in simulation.
 
 Expected files (searched next to the open RoboDK station, see resolve_data_dir):
-  piece_path.txt    x y z nx ny nz type layer   (plastic piece, new normal-only export)
+  piece_path.csv    x,y,z,nx,ny,nz,type,layer  (plastic piece, new normal-only export)
   mold_path.txt     x y z nx ny nz type layer   (optional mold, printed first)
   fibers_transformed/layer_<i>/fiber_<i>_<j>.csv  x,y,z,nx,ny,nz   (fibers)
 Piece and fibers must be expressed in the same frame (part frame).
@@ -35,7 +35,7 @@ import numpy as np
 # the value as given, then next to the open RoboDK station
 # (PATH_OPENSTATION), then the current directory.
 FIBERS_DIR = "fibers_transformed"
-PIECE_FILE = "piece_path.txt"       # plastic piece: printed after the mold
+PIECE_FILE = "piece_path.csv"        # plastic piece: printed after the mold
 MOLD_FILE = "mold_path.txt"         # optional: printed first if present
 PRINT_MOLD = True                   # False: skip the mold even if present
 
@@ -303,6 +303,36 @@ def _load_path_txt(path):
     return P, N, types, layers
 
 
+def _load_path_csv(path):
+    """Load a trajectory from the single CSV export:
+    'x,y,z,nx,ny,nz,type[,layer]' per row, segment type as a text label
+    (see SlicedObject.export_path_to_csv). Returns (P, N, types, layers):
+    normals N are (N, 3) or None when the file has no normal columns."""
+    rows, _ = read_csv(path)
+    if not rows:
+        raise SystemExit(f"{path}: no usable rows found")
+    ncols = len(rows[0])
+    has_n = ncols >= 7
+    P = np.array([[float(v) for v in r[0:3]] for r in rows])
+    if has_n:
+        N = np.array([[float(v) for v in r[3:6]] for r in rows])
+        types = np.array([r[6] for r in rows], dtype=object)
+        layers = np.array([int(float(r[7])) if ncols >= 8 and r[7] else 0 for r in rows])
+    else:
+        N = None
+        types = np.array([r[3] for r in rows], dtype=object)
+        layers = np.array([int(float(r[4])) if ncols >= 5 and r[4] else 0 for r in rows])
+    return P, N, types, layers
+
+
+def _load_path(path):
+    """Dispatch on the file extension: .csv -> CSV export (plastic piece),
+    anything else -> whitespace-separated txt export (mold)."""
+    if str(path).lower().endswith(".csv"):
+        return _load_path_csv(path)
+    return _load_path_txt(path)
+
+
 def load_mold(path):
     """Load the mold trajectory (normal-aware txt export, see
     SlicedMold.export_layers_to_txt). The normals are kept but ignored when
@@ -331,13 +361,13 @@ def load_mold(path):
 
 # ----------------------------- plastic -----------------------------
 def load_plastic(path, layers=PLASTIC_LAYERS, prefix="plastic "):
-    """Load the plastic piece trajectory from the single whitespace-separated
-    txt export ('x y z nx ny nz type layer', see
-    SlicedPiece.export_layers_to_txt) and keep the requested layers.
+    """Load the plastic piece trajectory from the single CSV export
+    ('x,y,z,nx,ny,nz,type,layer', see SlicedPiece.export_layers_to_csv)
+    and keep the requested layers.
     layers: 'first', 'all', or a list of layer numbers."""
-    P, N, T, layers_arr = _load_path_txt(path)
+    P, N, T, layers_arr = _load_path(path)
     if N is None:
-        raise SystemExit(f"{path}: expected the normal columns (x y z nx ny nz type layer)")
+        raise SystemExit(f"{path}: expected the normal columns (x,y,z,nx,ny,nz,type,layer)")
     if len(P) == 0:
         raise SystemExit(f"No points in {path}")
 
@@ -661,7 +691,7 @@ def main(argv=None):
     args = parse_args(argv)
 
     RDK = robolink.Robolink()
-    # Open station folder: the data (piece_path.txt, mold_path.txt,
+    # Open station folder: the data (piece_path.csv, mold_path.txt,
     # fibers_transformed/) lives next to the .rdk file.
     station_dir = RDK.getParam("PATH_OPENSTATION") or ""
     bases = [station_dir, os.getcwd()]
@@ -819,7 +849,7 @@ def plastic_layers(args):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--piece", default=PIECE_FILE,
-                        help="piece txt file (x y z nx ny nz type layer)")
+                        help="piece CSV file (x,y,z,nx,ny,nz,type,layer)")
     parser.add_argument("--fibers", default=FIBERS_DIR,
                         help="folder holding layer_<i>/fiber_<i>_<j>.csv (fibers)")
     parser.add_argument("--plastic-layers", default=PLASTIC_LAYERS,

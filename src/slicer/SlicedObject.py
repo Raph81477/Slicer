@@ -560,7 +560,7 @@ class SlicedObject:
         return self.build_orthonormal_frames(tangents, normals, approach_sign=approach_sign)
 
     @staticmethod
-    def export_path_to_txt(
+    def export_path_to_csv(
         path_segments: list[np.ndarray],
         segment_types: list[str],
         filepath,
@@ -569,10 +569,10 @@ class SlicedObject:
         mode: str = "w",
     ) -> None:
         """
-        Write an ordered printing path to a plain-text file, one point per
-        line: "x y z [nx ny nz] type [layer]", where (nx, ny, nz) is the
-        local surface normal at that point. No tool axes are exported:
-        the receiving end (e.g. a RoboDK program) builds the full robot
+        Write an ordered printing path to a CSV file, one point per row:
+        "x,y,z,nx,ny,nz,type[,layer]", where (nx, ny, nz) is the local
+        surface normal at that point. No tool axes are exported: the
+        receiving end (e.g. a RoboDK program) builds the full robot
         orientation itself from the points (travel direction) and the
         normal.
 
@@ -590,17 +590,49 @@ class SlicedObject:
           header. Use "a" from the second layer onward when building up
           a multi-layer trajectory file.
         """
+        SlicedObject._export_path(
+            path_segments, segment_types, filepath, normals, layer_id, mode, sep=","
+        )
+
+    @staticmethod
+    def export_path_to_txt(
+        path_segments: list[np.ndarray],
+        segment_types: list[str],
+        filepath,
+        normals: list[np.ndarray] | None = None,
+        layer_id=None,
+        mode: str = "w",
+    ) -> None:
+        """
+        Write an ordered printing path to a plain-text (whitespace-
+        separated) file, one point per row: "x y z nx ny nz type [layer]",
+        where (nx, ny, nz) is the local surface normal at that point. No
+        tool axes are exported: the receiving end (e.g. a RoboDK
+        program) builds the full robot orientation itself from the
+        points (travel direction) and the normal.
+
+        Same parameters as export_path_to_csv (see there); only the
+        column separator differs.
+        """
+        SlicedObject._export_path(
+            path_segments, segment_types, filepath, normals, layer_id, mode, sep=" "
+        )
+
+    @staticmethod
+    def _export_path(
+        path_segments: list[np.ndarray],
+        segment_types: list[str],
+        filepath,
+        normals: list[np.ndarray] | None,
+        layer_id,
+        mode: str,
+        sep: str,
+    ) -> None:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         write_header = mode == "w" or not filepath.exists()
 
-        # One printf-style format per segment: the (constant) type and layer
-        # labels are baked into the format, so each segment is written with
-        # a single np.savetxt call instead of one f-string per point.
-        numeric_fmt = ["%.4f"] * 3
-        if normals is not None:
-            numeric_fmt += ["%.6f"] * 3
-        layer_suffix = f" {layer_id}" if layer_id is not None else ""
+        layer_col = f"{sep}{layer_id}" if layer_id is not None else ""
 
         with open(filepath, mode, encoding="utf-8", newline="") as f:
             if write_header:
@@ -610,7 +642,7 @@ class SlicedObject:
                 header.append("type")
                 if layer_id is not None:
                     header.append("layer")
-                f.write(" ".join(header) + "\n")
+                f.write(sep.join(header) + "\n")
 
             for seg_idx, (seg, seg_type) in enumerate(zip(path_segments, segment_types)):
                 seg = np.asarray(seg, dtype=float)
@@ -623,8 +655,10 @@ class SlicedObject:
                 else:
                     data = seg
 
-                fmt = " ".join(numeric_fmt) + f" {seg_type}{layer_suffix}"
-                np.savetxt(f, data, fmt=fmt, newline="\n")
+                # np.savetxt cannot append a per-row trailing string, so
+                # the type (+ layer) suffix is appended to each row here.
+                for row in data:
+                    f.write(sep.join(f"{v:.4f}" for v in row) + f"{sep}{seg_type}{layer_col}\n")
 
     def export_printing_path(
         self,
@@ -637,16 +671,17 @@ class SlicedObject:
         mode: str = "w",
     ) -> None:
         """
-        Convenience wrapper around export_path_to_txt: optionally
-        simplifies each segment with Ramer-Douglas-Peucker (see
-        simplify_polyline) to shrink the exported file/robot program,
-        then computes this layer's local surface normals (see
-        compute_path_normals) - on the simplified points, so the normals
-        written out always match the points actually written out. Only
-        the points, their local normal and the segment type are
-        exported: the full tool orientation is reconstructed on the
-        receiving end (e.g. by the RoboDK program) from the trajectory
-        itself.
+        Convenience wrapper around export_path_to_csv / export_path_to_txt
+        (chosen from the file extension: .csv -> comma-separated,
+        anything else -> whitespace-separated): optionally simplifies each
+        segment with Ramer-Douglas-Peucker (see simplify_polyline) to
+        shrink the exported file/robot program, then computes this layer's
+        local surface normals (see compute_path_normals) - on the
+        simplified points, so the normals written out always match the
+        points actually written out. Only the points, their local normal
+        and the segment type are exported: the full tool orientation is
+        reconstructed on the receiving end (e.g. by the RoboDK program)
+        from the trajectory itself.
 
         Note: simplification is applied independently to each segment
         (curve, connection, approach, leave), so it only removes points
@@ -662,7 +697,12 @@ class SlicedObject:
 
         normals = self.compute_path_normals(path_segments) if include_normal else None
 
-        self.export_path_to_txt(
+        exporter = (
+            self.export_path_to_csv
+            if Path(filepath).suffix.lower() == ".csv"
+            else self.export_path_to_txt
+        )
+        exporter(
             path_segments,
             segment_types,
             filepath,

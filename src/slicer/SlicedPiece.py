@@ -465,7 +465,7 @@ class SlicedPiece(SlicedObject):
         )
 
     @classmethod
-    def export_layers_to_txt(
+    def export_layers_to_csv(
         cls,
         pieces: list["SlicedPiece"],
         filepath,
@@ -479,7 +479,7 @@ class SlicedPiece(SlicedObject):
         """
         Build the full printing path for every given piece layer and
         write the whole trajectory (all layers, in order) to a single
-        text file, ready to be loaded by an external trajectory simulator
+        CSV file, ready to be loaded by an external trajectory simulator
         such as RoboDK.
 
         simplify_tolerance: when given, each segment is simplified with
