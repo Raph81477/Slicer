@@ -58,6 +58,43 @@ class SlicedPiece(SlicedObject):
 
         return fiber_paths
 
+    @staticmethod
+    def save_fiber_paths(
+        fiber_paths: dict[int, np.ndarray],
+        directory: Path,
+        layer: int = 1,
+        normals: dict[int, np.ndarray] | None = None,
+        fmt: str = "%.5f",
+    ) -> list[Path]:
+        """
+        Save the fiber paths of a given layer to "fibers/layer_<layer>"
+        CSV files, in the same format as the oamc export (x, y, z, nx, ny,
+        nz): the files are named fiber_<layer>_<i>.csv and can be reloaded
+        with load_fiber_paths.
+
+        `normals` optionally provides one unit vector per point of each
+        fiber (same keying as fiber_paths); when omitted, the normals are
+        written as zeros.
+        """
+        layer_dir = Path(directory) / f"fibers/layer_{layer}"
+        layer_dir.mkdir(parents=True, exist_ok=True)
+
+        written = []
+        for i, path in fiber_paths.items():
+            points = np.asarray(path, dtype=float)
+            if normals is not None and i in normals:
+                n = np.asarray(normals[i], dtype=float)
+            else:
+                n = np.zeros_like(points)
+            rows = np.hstack([points, n])
+
+            csv_file = layer_dir / f"fiber_{layer}_{i}.csv"
+            with open(csv_file, mode="w", encoding="utf-8", newline="") as file:
+                np.savetxt(file, rows, delimiter=",", fmt=fmt)
+            written.append(csv_file)
+
+        return written
+
     @property
     def fiber_mean_direction(self) -> np.ndarray:
         """
