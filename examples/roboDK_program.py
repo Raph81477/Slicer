@@ -333,7 +333,7 @@ def _load_path(path):
     return _load_path_txt(path)
 
 
-def load_mold(path):
+def load_mold(path, lift_travel=LIFT_TRAVEL):
     """Load the mold trajectory (normal-aware txt export, see
     SlicedMold.export_layers_to_txt). The normals are kept but ignored when
     VERTICAL_TOOL is set (the mold is quasi-flat)."""
@@ -341,7 +341,7 @@ def load_mold(path):
 
     # Detour detection per layer (a mold layer is quasi-flat by construction).
     ndet = relabel_detours(P, types, layers)
-    if LIFT_TRAVEL:
+    if lift_travel:
         nlift = lift_travel(P, types, layers)
     else:
         nlift = 0
@@ -360,7 +360,7 @@ def load_mold(path):
 
 
 # ----------------------------- plastic -----------------------------
-def load_plastic(path, layers=PLASTIC_LAYERS, prefix="plastic "):
+def load_plastic(path, layers=PLASTIC_LAYERS, prefix="plastic ", lift_travel=LIFT_TRAVEL):
     """Load the plastic piece trajectory from the single CSV export
     ('x,y,z,nx,ny,nz,type,layer', see SlicedPiece.export_layers_to_csv)
     and keep the requested layers.
@@ -415,7 +415,7 @@ def load_plastic(path, layers=PLASTIC_LAYERS, prefix="plastic "):
                     detour |= m & is_print & (P[:, 2] < zr - DETOUR_Z_TOL)
                 T[detour] = "leave"
                 ndet += int((detour & m).sum())
-                if LIFT_TRAVEL:
+                if lift_travel:
                     for _, zr in zref.items():
                         low = m & np.isin(T, ("approach", "leave")) & (P[:, 2] < zr - DETOUR_Z_TOL)
                         P[low, 2] = zr + Z_LIFT
@@ -671,16 +671,16 @@ def main(argv=None):
 
     # --- mold (optional): printed first, plastic only ---
     mold_moves, mold_runs = [], []
-    if PRINT_MOLD and not args.no_mold:
+    if args.print_mold:
         mold_file = resolve_data_file(args.mold, bases)
         if os.path.isfile(mold_file):
-            mold = load_mold(mold_file)
+            mold = load_mold(mold_file, lift_travel=args.lift_travel)
             mold_moves, mold_runs = plastic_moves(mold, prefix="mold ")
             print(f"Mold: {len(mold_moves)} moves")
         else:
             print(f"Mold skipped: file {mold_file} not found")
 
-    plastic = load_plastic(piece_file, plastic_layers(args))
+    plastic = load_plastic(piece_file, plastic_layers(args), lift_travel=args.lift_travel)
     moves, plastic_runs = plastic_moves(plastic)
 
     _, files = find_fiber_files(fibers_dir, args.fiber_layer)
@@ -737,7 +737,7 @@ def main(argv=None):
     robot.setPoseFrame(frame)
     robot.setPoseTool(tool)
 
-    if CHECK_REACH:
+    if args.check_reach:
         tested = list(range(0, len(moves), CHECK_STEP))
         bad = [k for k in tested
                if len(robot.SolveIK(mat(moves[k].pose)).rows) < 6]
@@ -747,7 +747,7 @@ def main(argv=None):
             print(f"  move {k + 1}: {moves[k].label} "
                   f"-> absolute approx {np.round(p_abs, 1).tolist()}")
 
-    if DRAW_CURVES:
+    if args.draw_curves:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
         draw_curves(RDK, robolink, frame, plastic_runs, "PrintTrace", [1, 0, 0, 1])
         draw_curves(RDK, robolink, frame, fiber_lines, "FiberTrace", [0, 0.3, 1, 1])
@@ -771,7 +771,7 @@ def main(argv=None):
     emit([("comment", "--- Printhead preparation ---")])
     emit([("code", c) for c in HEAD_INIT_CODE])
 
-    if TRACE_ONLY_PRINT:
+    if args.trace_only_print:
         ensure_trace_programs(RDK, robolink)
         RDK.Command("Trace", "Reset")      # clear previous traces
         trace_on = None
@@ -785,7 +785,7 @@ def main(argv=None):
             prog.setRounding(m.rounding)
             cur_round = m.rounding
         emit(m.pre)
-        if TRACE_ONLY_PRINT:
+        if args.trace_only_print:
             if m.is_print != trace_on:
                 prog.RunInstruction("TraceOn" if m.is_print else "TraceOff",
                                     robolink.INSTRUCTION_CALL_PROGRAM)
@@ -827,8 +827,29 @@ def parse_args(argv=None):
                         help="'first' or a fiber layer number")
     parser.add_argument("--mold", default=MOLD_FILE,
                         help="mold txt file (empty = skip the mold)")
-    parser.add_argument("--no-mold", action="store_true",
-                        help="do not print the mold even if present")
+    # Boolean options: each one is a module constant by default, flipped
+    # from the command line with the paired store_true / store_false flags
+    # (e.g. --no-mold sets print_mold=False, --mold-print restores True).
+    bool_opts = (
+        # (dest,       default,       '--off' flag,     '--on' flag,     help)
+        ("print_mold", PRINT_MOLD, "--no-mold", "--print-mold",
+         "print the mold first (piece printed on top of it)"),
+        ("lift_travel", LIFT_TRAVEL, "--no-lift-travel", "--lift-travel",
+         "raise approach/leave points below the print height (Z_LIFT clearance)"),
+        ("check_reach", CHECK_REACH, "--no-check-reach", "--check-reach",
+         "test IK reachability of the generated moves"),
+        ("draw_curves", DRAW_CURVES, "--no-draw-curves", "--draw-curves",
+         "draw the trajectories as RoboDK curves"),
+        ("trace_only_print", TRACE_ONLY_PRINT, "--trace-all", "--trace-only-print",
+         "RoboDK trace simulation only on curve/connection points"),
+    )
+    for dest, default, off, on, help_ in bool_opts:
+        g = parser.add_mutually_exclusive_group()
+        g.add_argument(off, dest=dest, action="store_false",
+                       help=f"disable: {help_}")
+        g.add_argument(on, dest=dest, action="store_true",
+                       help=f"enable: {help_}")
+        parser.set_defaults(**{dest: default})
     return parser.parse_args(argv)
 
 
