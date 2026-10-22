@@ -17,6 +17,14 @@ tangent is used: the rotation about the nozzle axis is kept as constant as
 possible (TCP X = projection of a fixed reference vector, see FIXED_X),
 which avoids the tool spinning about its nozzle and the IK/simulation
 errors that come with it.
+
+Two different printheads are used: the thermoplastic one (mold + piece)
+and the composite/fiber one. They are two separate RoboDK tools whose TCP
+conventions differ (the X of one matches the Z of the other), so the poses
+are remapped per phase onto each tool's real nozzle axis
+(NOZZLE_TCP_AXIS_PLASTIC / NOZZLE_TCP_AXIS_FIBER) and the program emits a
+real tool change (setPoseTool) at the plastic -> fiber transition
+(PLASTIC_TOOL_NAME / FIBER_TOOL_NAME).
 """
 from __future__ import annotations
 
@@ -38,6 +46,10 @@ import numpy as np
 FIBERS_DIR = "fibers_transformed"
 PIECE_FILE = "piece_path.csv"        # plastic piece: printed after the mold
 MOLD_FILE = "mold_path.txt"         # optional: printed first if present
+PLASTIC_TOOL_NAME = ""              # station tool for the thermoplastic printhead
+                                    # ("" = the tool currently attached to the robot)
+FIBER_TOOL_NAME = "Fiber Tool"      # station tool for the composite/fiber printhead
+                                    # ("" = same tool as the plastic, no tool change)
 PRINT_MOLD = True                   # False: skip the mold even if present
 
 PLASTIC_LAYERS = "first"           # "first" = first layer found; "all" = every layer in
@@ -81,7 +93,14 @@ FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 # part) is carried by the tool's +X, and the tool's Z keeps the "print
 # plane" direction (the built +X). Check in RoboDK: the nozzle must end
 # up perpendicular to the printed surface, pointing at it.
-NOZZLE_TCP_AXIS = "x"
+#
+# The plastic printhead and the fiber printhead are two DIFFERENT RoboDK
+# tools, and their TCP conventions differ (the X of one matches the Z of
+# the other), so each phase gets its own setting:
+NOZZLE_TCP_AXIS_PLASTIC = "x"    # thermoplastic tool (mold + piece): nozzle axis
+NOZZLE_TCP_AXIS_FIBER = "z"     # composite/fiber tool: nozzle axis
+# Aliases for readability below.
+NOZZLE_TCP_AXIS = NOZZLE_TCP_AXIS_PLASTIC
 
 # --- Plastic ---
 MIN_STEP = 0.05                     # mm: minimum distance between two kept points
@@ -204,6 +223,7 @@ class Move:
     rounding: float
     label: str
     is_print: bool = False                   # True: material is being deposited (trace on)
+    tool: str = "plastic"                    # "plastic" | "fiber": which printhead
     pre: list = field(default_factory=list)     # ("comment"|"code"|"pause", value)
     post: list = field(default_factory=list)
 
@@ -779,11 +799,18 @@ def main(argv=None):
     # termination: heaters off etc., emitted after the last move
     moves[-1].post += [("code", c) for c in TERMINATION_CODE]
 
-    # Remap every pose onto the station tool's real nozzle axis (the poses
-    # are built with Z = approach; NOZZLE_TCP_AXIS says which TCP axis
-    # carries the nozzle in the station tool frame).
-    for mv in moves:
-        mv.pose = remap_nozzle_axis(mv.pose, NOZZLE_TCP_AXIS)
+    # The two printheads are different RoboDK tools with different TCP
+    # conventions (the X of one matches the Z of the other): remap the
+    # poses per phase, onto the nozzle axis of each station tool.
+    # The lift moves inherit the tool of the phase that produced them
+    # (mold/piece lifts: plastic; the lift before the fibers: fiber).
+    fiber_start = len(moves) - len(fmoves)
+    for i, mv in enumerate(moves):
+        axis = NOZZLE_TCP_AXIS_FIBER if i >= fiber_start else NOZZLE_TCP_AXIS_PLASTIC
+        mv.pose = remap_nozzle_axis(mv.pose, axis)
+    # the lift between plastic and fibers is emitted right before the
+    # fiber moves but is still travelled with the plastic tool attached
+    # (the change happens at the start of the fiber phase below)
 
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
@@ -791,6 +818,18 @@ def main(argv=None):
     tool = robot.getLink(robolink.ITEM_TYPE_TOOL)
     if not tool.Valid():
         raise SystemExit("No tool attached to the robot: attach the printhead in RoboDK")
+
+    # Fiber printhead: a second station tool. When configured, the program
+    # emits a real tool change at the plastic -> fiber transition; the
+    # fiber moves are then expressed in this tool's TCP (whose convention
+    # differs from the plastic tool: NOZZLE_TCP_AXIS_FIBER).
+    fiber_tool = tool
+    if FIBER_TOOL_NAME:
+        fiber_tool = RDK.Item(FIBER_TOOL_NAME, robolink.ITEM_TYPE_TOOL)
+        if not fiber_tool.Valid():
+            raise SystemExit(
+                f"No tool named {FIBER_TOOL_NAME!r} in the station: "
+                "create it or clear FIBER_TOOL_NAME to keep the plastic tool")
 
     frame = RDK.Item(FRAME_NAME, robolink.ITEM_TYPE_FRAME)
     if not frame.Valid():
@@ -854,7 +893,16 @@ def main(argv=None):
         trace_on = None
 
     cur_speed = cur_round = None
+    cur_tool = None
     for n, m in enumerate(moves):
+        # Tool change at the plastic -> fiber transition: the move poses
+        # are already expressed in each tool's TCP (remapped per phase), so
+        # the program must switch the active tool at the same boundary.
+        move_tool = fiber_tool if n >= fiber_start else tool
+        if move_tool is not cur_tool:
+            prog.setPoseTool(move_tool)
+            emit([("comment", f"--- Tool change: {move_tool.Name()} ---")])
+            cur_tool = move_tool
         if m.speed != cur_speed:
             prog.setSpeed(m.speed)
             cur_speed = m.speed
