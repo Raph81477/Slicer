@@ -69,6 +69,20 @@ FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its proj
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
+# --- Tool frame convention ---
+# TCP axis along which the nozzle actually points IN THE STATION TOOL
+# FRAME. The poses are built with the RoboDK convention (Z = approach
+# axis), then remapped onto this axis right before the program is emitted:
+#   "z" -> no remap (station tool already has Z along the nozzle)
+#   "x" -> the station tool has the nozzle along its X axis
+#   "y" -> the station tool has the nozzle along its Y axis
+# With NOZZLE_TCP_AXIS = "x", the frame (X, Y, Z)_built becomes the TCP
+# frame (Z', Y', X') = (-X, Y, Z): the built approach axis (-Z, towards the
+# part) is carried by the tool's +X, and the tool's Z keeps the "print
+# plane" direction (the built +X). Check in RoboDK: the nozzle must end
+# up perpendicular to the printed surface, pointing at it.
+NOZZLE_TCP_AXIS = "x"
+
 # --- Plastic ---
 MIN_STEP = 0.05                     # mm: minimum distance between two kept points
 DETOUR_Z_TOL = 0.2                  # mm: curve/connection point below print height - tol -> 'leave'
@@ -237,6 +251,38 @@ def resolve_data_file(path, extra_bases=()):
 
 
 # ----------------------- geometry helpers -----------------------
+def remap_nozzle_axis(T, axis=NOZZLE_TCP_AXIS):
+    """Remap a pose built with the RoboDK convention (Z = approach axis)
+    onto the TCP axis that actually carries the nozzle in the station
+    tool frame (NOZZLE_TCP_AXIS, set when the poses are emitted).
+
+    The built TCP Z already points INTO the surface (towards the part,
+    PIECE_TOOL_SIGN = -1), i.e. the nozzle axis IS the built +Z. Remapping
+    must (a) carry that +Z_built on the configured TCP axis and (b) stay
+    right-handed, so the other two axes are permuted (with the sign that
+    keeps det = +1):
+      "z": identity
+      "x": (X, Y, Z)_tcp = (Z, -Y, X)_built   (TCP X = nozzle axis,
+             TCP Z = built X, TCP Y flipped)
+      "y": (X, Y, Z)_tcp = (-X, Z, Y)_built   (TCP Y = nozzle axis,
+             TCP Z = built Y, TCP X flipped)
+    Works on a single 4x4 pose or a list of poses, in place."""
+    if axis == "z":
+        return T
+    if axis not in ("x", "y"):
+        raise ValueError(f"NOZZLE_TCP_AXIS must be 'x', 'y' or 'z', got {axis!r}")
+    single = np.ndim(T) == 2
+    T = np.asarray(T, dtype=float)
+    if single:
+        T = T[None, :, :]
+    X, Y, Z = T[:, :3, 0].copy(), T[:, :3, 1].copy(), T[:, :3, 2].copy()
+    if axis == "x":
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = Z, -Y, X
+    else:
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = -X, Z, Y
+    return T[0] if single else T
+
+
 def frames_from_z(P, Z, ref):
     """4x4 matrices: given Z, X = projection of ref onto the plane normal to Z."""
     Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
@@ -691,21 +737,22 @@ def main(argv=None):
     plastic = load_plastic(piece_file, plastic_layers(args), lift_travel=args.lift_travel)
     moves, plastic_runs = plastic_moves(plastic)
 
-    # Orientation diagnostics: mean exported normal vs TCP Z of the first
-    # piece move. They must be colinear (opposite by default, since TCP Z =
-    # PIECE_TOOL_SIGN * normal with PIECE_TOOL_SIGN = -1). If the tool axis
+    # Orientation diagnostics: mean exported normal vs the nozzle axis of
+    # the first piece move (before the NOZZLE_TCP_AXIS remap, the nozzle
+    # axis is the built TCP Z = PIECE_TOOL_SIGN * normal). If the tool axis
     # looks wrong in the simulation, compare these two lines first: a sign
     # convention mismatch shows up as dot(z_tcp, mean_normal) ~= +1 instead
-    # of -1 (fix: PIECE_TOOL_SIGN = +1, or reorient the station tool frame
-    # so that its Z points along the nozzle, out of the tool).
+    # of -1 (fix: PIECE_TOOL_SIGN = +1), and an axis mismatch means the
+    # station tool's nozzle axis is not its Z (fix: NOZZLE_TCP_AXIS).
     if plastic.normals is not None and len(moves):
         mean_n = plastic.normals.mean(axis=0)
         mean_n = mean_n / np.linalg.norm(mean_n)
-        z_tcp = moves[0].pose[:3, 2]
-        print(f"Orientation check: mean exported normal = {np.round(mean_n, 3).tolist()}")
-        print(f"Orientation check: first piece TCP Z      = {np.round(z_tcp, 3).tolist()} "
-              f"(dot with normal: {float(np.dot(z_tcp, mean_n)):+.2f}, "
-              f"expected {-PIECE_TOOL_SIGN:+d})")
+        nozzle = moves[0].pose[:3, 2]
+        print(f"Orientation check: mean exported normal  = {np.round(mean_n, 3).tolist()}")
+        print(f"Orientation check: built nozzle axis (Z)  = {np.round(nozzle, 3).tolist()} "
+              f"(dot with normal: {float(np.dot(nozzle, mean_n)):+.2f}, "
+              f"expected {-PIECE_TOOL_SIGN:+d}; remapped onto TCP "
+              f"{NOZZLE_TCP_AXIS.upper()})")
 
     _, files = find_fiber_files(fibers_dir, args.fiber_layer)
     fmoves, fiber_lines = fiber_moves(files)
@@ -731,6 +778,12 @@ def main(argv=None):
 
     # termination: heaters off etc., emitted after the last move
     moves[-1].post += [("code", c) for c in TERMINATION_CODE]
+
+    # Remap every pose onto the station tool's real nozzle axis (the poses
+    # are built with Z = approach; NOZZLE_TCP_AXIS says which TCP axis
+    # carries the nozzle in the station tool frame).
+    for mv in moves:
+        mv.pose = remap_nozzle_axis(mv.pose, NOZZLE_TCP_AXIS)
 
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
