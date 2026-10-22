@@ -564,24 +564,24 @@ class SlicedObject:
         path_segments: list[np.ndarray],
         segment_types: list[str],
         filepath,
-        orientations: list[np.ndarray] | None = None,
+        normals: list[np.ndarray] | None = None,
         layer_id=None,
         mode: str = "w",
     ) -> None:
         """
         Write an ordered printing path to a plain-text file, one point per
-        line: "x y z [ux uy uz vx vy vz wx wy wz] type [layer]", where
-        (u, v, w) are the tool's X, Y, Z axes in world coordinates - i.e.
-        a full robot pose, position plus orientation.
+        line: "x y z [nx ny nz] type [layer]", where (nx, ny, nz) is the
+        local surface normal at that point. No tool axes are exported:
+        the receiving end (e.g. a RoboDK program) builds the full robot
+        orientation itself from the points (travel direction) and the
+        normal.
 
         - path_segments / segment_types: as returned by
           build_full_printing_path (SlicedPiece) or build_support_path
           (SlicedMold).
-        - orientations: optional, same shape as path_segments, one 3x3
-          rotation matrix per point (see compute_path_orientation /
-          build_orthonormal_frames). When given, each point's tool X, Y,
-          Z axes are written right after its coordinates, ready to build
-          a 4x4 pose matrix on the receiving end (e.g. in RoboDK).
+        - normals: optional, same shape as path_segments, one unit vector
+          per point (see compute_path_normals). When omitted, only the
+          point coordinates are written.
         - layer_id: optional label (e.g. a layer index) written as a
           trailing column; handy when appending several layers to the
           same file so they stay distinguishable.
@@ -598,15 +598,15 @@ class SlicedObject:
         # labels are baked into the format, so each segment is written with
         # a single np.savetxt call instead of one f-string per point.
         numeric_fmt = ["%.4f"] * 3
-        if orientations is not None:
-            numeric_fmt += ["%.6f"] * 9
+        if normals is not None:
+            numeric_fmt += ["%.6f"] * 3
         layer_suffix = f" {layer_id}" if layer_id is not None else ""
 
         with open(filepath, mode, encoding="utf-8", newline="") as f:
             if write_header:
                 header = ["x", "y", "z"]
-                if orientations is not None:
-                    header += ["ux", "uy", "uz", "vx", "vy", "vz", "wx", "wy", "wz"]
+                if normals is not None:
+                    header += ["nx", "ny", "nz"]
                 header.append("type")
                 if layer_id is not None:
                     header.append("layer")
@@ -617,11 +617,9 @@ class SlicedObject:
                 if len(seg) == 0:
                     continue
 
-                if orientations is not None:
-                    # Per point: X axis (3), Y axis (3), Z axis (3), i.e.
-                    # the columns of the rotation matrix, in this order.
-                    R = np.asarray(orientations[seg_idx])
-                    data = np.hstack([seg, R.transpose(0, 2, 1).reshape(len(seg), 9)])
+                if normals is not None:
+                    n = np.asarray(normals[seg_idx], dtype=float).reshape(len(seg), 3)
+                    data = np.hstack([seg, n])
                 else:
                     data = seg
 
@@ -633,8 +631,7 @@ class SlicedObject:
         path_segments: list[np.ndarray],
         segment_types: list[str],
         filepath,
-        include_orientation: bool = False,
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
         layer_id=None,
         mode: str = "w",
@@ -643,10 +640,13 @@ class SlicedObject:
         Convenience wrapper around export_path_to_txt: optionally
         simplifies each segment with Ramer-Douglas-Peucker (see
         simplify_polyline) to shrink the exported file/robot program,
-        then optionally computes this layer's full tool orientation
-        (normal + travel tangent, see compute_path_orientation) - on the
-        simplified points, so the orientation written out always matches
-        the points actually written out.
+        then computes this layer's local surface normals (see
+        compute_path_normals) - on the simplified points, so the normals
+        written out always match the points actually written out. Only
+        the points, their local normal and the segment type are
+        exported: the full tool orientation is reconstructed on the
+        receiving end (e.g. by the RoboDK program) from the trajectory
+        itself.
 
         Note: simplification is applied independently to each segment
         (curve, connection, approach, leave), so it only removes points
@@ -660,17 +660,13 @@ class SlicedObject:
 
         path_segments = self.drop_shared_points(path_segments)
 
-        orientations = (
-            self.compute_path_orientation(path_segments, approach_sign=approach_sign)
-            if include_orientation
-            else None
-        )
+        normals = self.compute_path_normals(path_segments) if include_normal else None
 
         self.export_path_to_txt(
             path_segments,
             segment_types,
             filepath,
-            orientations=orientations,
+            normals=normals,
             layer_id=layer_id,
             mode=mode,
         )

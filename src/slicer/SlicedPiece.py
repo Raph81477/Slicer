@@ -436,8 +436,7 @@ class SlicedPiece(SlicedObject):
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
-        include_orientation: bool = False,
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
     ) -> None:
         """
@@ -465,8 +464,7 @@ class SlicedPiece(SlicedObject):
                 segments,
                 types,
                 filepath,
-                include_orientation=include_orientation,
-                approach_sign=approach_sign,
+                include_normal=include_normal,
                 simplify_tolerance=simplify_tolerance,
                 layer_id=i,
                 mode="w" if i == 0 else "a",

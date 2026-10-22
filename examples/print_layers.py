@@ -135,7 +135,7 @@ def main() -> None:
         contour_width=3.0,
         approach_distance=1.0,
         max_connection_length=4 * 0.5,
-        include_orientation=True,
+        include_normal=True,
         simplify_tolerance=0.5, #mm
     )
     plotter.show()
