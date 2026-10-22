@@ -12,10 +12,11 @@ Piece and fibers must be expressed in the same frame (part frame).
 
 The trajectory files no longer contain any tool axes: only the points, their
 local surface normal and the segment type. The tool orientation is rebuilt
-here: TCP Z = PIECE_TOOL_SIGN * normal, TCP X = the local travel direction
-(tangent, recomputed from the points), re-orthogonalized against Z. On
-approach/leave moves (travel along the normal, no meaningful tangent) the
-previous TCP X is kept, so the tool does not spin about its nozzle.
+here from the normal ONLY: TCP Z = PIECE_TOOL_SIGN * normal. No travel
+tangent is used: the rotation about the nozzle axis is kept as constant as
+possible (TCP X = projection of a fixed reference vector, see FIXED_X),
+which avoids the tool spinning about its nozzle and the IK/simulation
+errors that come with it.
 """
 from __future__ import annotations
 
@@ -56,9 +57,8 @@ VERTICAL_SIGN = -1             # (vertical mode) -1: TCP Z towards -Z of the par
                                # down); +1: up
 PIECE_TOOL_SIGN = -1          # piece: tool Z = PIECE_TOOL_SIGN * local surface normal
                                # (-1: TCP Z points into the surface)
-X_MODE = "fixed"               # "fixed": constant TCP X (no useless rotation about the nozzle)
-                               # "tangent": TCP X follows the travel direction of the path
-FIXED_X = [0, 1, 0]            # reference vector (part frame) for "fixed" mode (and vertical)
+FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its projection on the
+                               # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
 # --- Plastic ---
@@ -440,10 +440,15 @@ def load_plastic(path, layers=PLASTIC_LAYERS, prefix="plastic "):
 def plastic_moves(p: PlasticPath, prefix="plastic "):
     """Build the TCP poses. Vertical mode (VERTICAL_TOOL=True): the nozzle
     stays normal to the z=0 plane of the part frame. Otherwise the pose is
-    rebuilt from the local surface normal exported in the trajectory file:
-    the nozzle axis is PIECE_TOOL_SIGN * normal, and the TCP X axis is
-    either fixed (X_MODE="fixed") or follows the travel direction of the
-    path ("tangent"), recomputed here from the points."""
+    rebuilt from the local surface normal exported in the trajectory file
+    ONLY: the nozzle axis is PIECE_TOOL_SIGN * normal. No travel tangent is
+    used anywhere: the rotation about the nozzle axis is kept as constant
+    as possible, which is what a non-cylindrical printhead needs to avoid
+    spinning (and IK/simulation errors). Concretely: X = projection of a
+    FIXED_X reference vector onto the plane perpendicular to Z; where Z
+    is nearly parallel to FIXED_X, X is taken from the neighbouring pose
+    (continuity) or from an axis-aligned fallback, so (X, Y, Z) stays a
+    valid right-handed frame at every point."""
     P = p.points
     n = len(P)
     vertical = VERTICAL_TOOL if prefix.startswith("mold") else PIECE_VERTICAL_TOOL
@@ -453,43 +458,7 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
     else:
         Z = PIECE_TOOL_SIGN * p.normals
         Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
-        if X_MODE == "fixed":
-            T = frames_from_z(P, Z, FIXED_X)
-        else:
-            # Travel tangent, computed per segment of a common (type,
-            # layer) so it is never taken across an approach/leave
-            # boundary: central difference inside, one-sided at the ends.
-            Xh = np.zeros_like(P)
-            seg = (p.types != np.roll(p.types, 1)) | (p.layers != np.roll(p.layers, 1))
-            starts = np.r_[0, np.where(seg)[0]]
-            ends = np.r_[starts[1:], n]
-            for a, b in zip(starts, ends):
-                m = b - a
-                if m == 1:
-                    Xh[a] = [1.0, 0.0, 0.0]
-                elif m == 2:
-                    Xh[a], Xh[a + 1] = P[a + 1] - P[a], P[a + 1] - P[a]
-                else:
-                    Xh[a] = P[a + 1] - P[a]
-                    Xh[a + 1 : b - 1] = P[a + 2 : b] - P[a : b - 2]
-                    Xh[b - 1] = P[b - 1] - P[b - 2]
-            X = Xh - (Xh * Z).sum(1, keepdims=True) * Z
-            nX = np.linalg.norm(X, axis=1)
-            # tangent nearly parallel to Z (straight approach/leave move):
-            # keep the previous X (continuity, no spin about the nozzle),
-            # else a FIXED_X fallback, both re-projected perpendicular to Z.
-            for i in np.where(nX < 1e-6)[0]:
-                ref = X[i - 1] if i > 0 and np.linalg.norm(X[i - 1]) > 1e-6 else np.array(FIXED_X, float)
-                x = ref - (ref * Z[i]) * Z[i]
-                if np.linalg.norm(x) < 1e-6:
-                    alt = np.array([1.0, 0.0, 0.0]) if abs(Z[i, 0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-                    x = alt - (alt * Z[i]) * Z[i]
-                X[i] = x
-                nX[i] = np.linalg.norm(x)
-            X /= nX[:, None]
-            Y = np.cross(Z, X)
-            T = np.tile(np.eye(4), (n, 1, 1))
-            T[:, :3, 0], T[:, :3, 1], T[:, :3, 2], T[:, :3, 3] = X, Y, Z, P
+        T = frames_from_z(P, Z, FIXED_X)
     types = p.types
     layers = p.layers
 
