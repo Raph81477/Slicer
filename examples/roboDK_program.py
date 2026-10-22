@@ -683,6 +683,22 @@ def main(argv=None):
     plastic = load_plastic(piece_file, plastic_layers(args), lift_travel=args.lift_travel)
     moves, plastic_runs = plastic_moves(plastic)
 
+    # Orientation diagnostics: mean exported normal vs TCP Z of the first
+    # piece move. They must be colinear (opposite by default, since TCP Z =
+    # PIECE_TOOL_SIGN * normal with PIECE_TOOL_SIGN = -1). If the tool axis
+    # looks wrong in the simulation, compare these two lines first: a sign
+    # convention mismatch shows up as dot(z_tcp, mean_normal) ~= +1 instead
+    # of -1 (fix: PIECE_TOOL_SIGN = +1, or reorient the station tool frame
+    # so that its Z points along the nozzle, out of the tool).
+    if plastic.normals is not None and len(moves):
+        mean_n = plastic.normals.mean(axis=0)
+        mean_n = mean_n / np.linalg.norm(mean_n)
+        z_tcp = moves[0].pose[:3, 2]
+        print(f"Orientation check: mean exported normal = {np.round(mean_n, 3).tolist()}")
+        print(f"Orientation check: first piece TCP Z      = {np.round(z_tcp, 3).tolist()} "
+              f"(dot with normal: {float(np.dot(z_tcp, mean_n)):+.2f}, "
+              f"expected {-PIECE_TOOL_SIGN:+d})")
+
     _, files = find_fiber_files(fibers_dir, args.fiber_layer)
     fmoves, fiber_lines = fiber_moves(files)
 
