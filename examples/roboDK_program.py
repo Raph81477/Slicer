@@ -55,8 +55,16 @@ PIECE_VERTICAL_TOOL = False   # PIECE (plastic txt): False = orientation rebuilt
                                # normal (5-axis); True = vertical nozzle like the mold
 VERTICAL_SIGN = -1             # (vertical mode) -1: TCP Z towards -Z of the part frame (nozzle
                                # down); +1: up
-PIECE_TOOL_SIGN = -1          # piece: tool Z = PIECE_TOOL_SIGN * local surface normal
-                               # (-1: TCP Z points into the surface)
+PIECE_TOOL_SIGN = -1          # piece: tool Z = PIECE_TOOL_SIGN * local surface normal.
+                               # Successor of the old TOOL_AXIS/TOOL_SIGN pair: the export no
+                               # longer carries tool axes, the nozzle axis IS the normal.
+                               # -1: TCP Z points into the surface (nozzle against the part);
+                               #    this matched the old defaults (TOOL_AXIS="w", TOOL_SIGN=-1
+                               #    exporting w = -normal, so TCP Z = +normal OUT of the
+                               #    surface... beware: the old combination was equivalent to
+                               #    PIECE_TOOL_SIGN = +1 - flip here if the tool looks
+                               #    reversed in the station)
+                               # +1: TCP Z points out of the surface
 FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its projection on the
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
