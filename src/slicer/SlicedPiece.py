@@ -277,7 +277,7 @@ class SlicedPiece(SlicedObject):
         return grid, q_values
 
     @staticmethod
-    def get_printing_layers(
+    def extract_layer_surfaces(
         model: CompositeModel,
         layer_indices: list[int] | None = None,
     ) -> list[pv.PolyData]:
@@ -300,7 +300,7 @@ class SlicedPiece(SlicedObject):
         fiber_paths: dict[int, np.ndarray] | None = None,
     ) -> list["SlicedPiece"]:
         """Slice a CompositeModel into a list of SlicedPiece layers."""
-        surfaces = cls.get_printing_layers(model)
+        surfaces = cls.extract_layer_surfaces(model)
         pieces = [cls(surface, fiber_paths) for surface in surfaces]
 
         # The fiber paths are shared by all the layers: compute their mean
@@ -336,18 +336,18 @@ class SlicedPiece(SlicedObject):
         return cls(surface, fiber_paths=fiber_paths)
 
     @staticmethod
-    def get_mean_surface_normals(
+    def get_mean_layer_normal(
         model: CompositeModel,
         surfaces: list[pv.PolyData] | None = None,
     ) -> np.ndarray:
         """
         Mean of all layer face normals over the whole model.
 
-        Pass `surfaces` (e.g. from get_printing_layers) to avoid
+        Pass `surfaces` (e.g. from extract_layer_surfaces) to avoid
         recomputing the isosurfaces.
         """
         if surfaces is None:
-            surfaces = SlicedPiece.get_printing_layers(model)
+            surfaces = SlicedPiece.extract_layer_surfaces(model)
 
         normal_sum = np.zeros(3)
         n_cells = 0
@@ -369,7 +369,7 @@ class SlicedPiece(SlicedObject):
         the global Z axis.
         """
         target = np.array([0, 0, 1])
-        mean_normal = -1 * SlicedPiece.get_mean_surface_normals(model, surfaces)
+        mean_normal = -1 * SlicedPiece.get_mean_layer_normal(model, surfaces)
         axis = np.cross(mean_normal, target)
         axis_norm = np.linalg.norm(axis)
 
@@ -404,13 +404,13 @@ class SlicedPiece(SlicedObject):
         # Merge coincident points first: an isosurface extracted from the
         # model's grid can have duplicate points along its boundary, which
         # confuses feature-edge (boundary) detection and makes
-        # build_offset_surface / extract_contour_polylines unreliable.
+        # clip_by_dist_to_boundary / extract_contour_polylines unreliable.
         # Assigning self.surface also invalidates every cached quantity
         # (normals, distance field), since the point indexing changes.
         self.surface = self.surface.merge_points(tolerance=merge_tolerance)
 
         planes = self.generate_slicing_planes(i_surface=i_surface)
-        inner_zone = self.build_offset_surface(contour_width, invert=False)
+        inner_zone = self.clip_by_dist_to_boundary(contour_width, invert=False)
 
         # Single-pass cut of the inner zone with all the planes
         infill_lines = self._cut_with_planes(inner_zone, planes)
