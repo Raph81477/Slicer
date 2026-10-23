@@ -1535,8 +1535,7 @@ class SlicedMold(SlicedObject):
         infill_percentage: float = 20.0,
         approach_distance: float = 1.0,
         layer_height: float = 0.35,
-        include_orientation: bool = False,
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
         shell_simplify_tolerance: float | None = None,
         collapse_infill: bool = False,
@@ -1545,7 +1544,8 @@ class SlicedMold(SlicedObject):
         """
         Build the full support printing path for every given layer and
         write the whole trajectory (all layers, in order) to a single
-        text file, ready to be loaded by an external trajectory simulator
+        plain-text (whitespace-separated) file, ready to be loaded by an
+        external trajectory simulator
         such as RoboDK.
 
         Mold-specific simplification (recommended over simplify_tolerance):
@@ -1579,8 +1579,7 @@ class SlicedMold(SlicedObject):
                 segments,
                 types,
                 filepath,
-                include_orientation=include_orientation,
-                approach_sign=approach_sign,
+                include_normal=include_normal,
                 simplify_tolerance=simplify_tolerance,
                 layer_id=layer.q,
                 mode="w" if i == 0 else "a",

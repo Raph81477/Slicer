@@ -129,13 +129,13 @@ def main() -> None:
 
         # Export the printing path of every layer to a single text file, ready
     # to be loaded by an external trajectory simulator such as RoboDK.
-    SlicedPiece.export_layers_to_txt(
+    SlicedPiece.export_layers_to_csv(
         pieces[0:1],
-        DIR / "trajectories" / "piece_path.txt",
+        DIR / "trajectories" / "piece_path.csv",
         contour_width=3.0,
         approach_distance=1.0,
         max_connection_length=4 * 0.5,
-        include_orientation=True,
+        include_normal=True,
         simplify_tolerance=0.5, #mm
     )
     plotter.show()

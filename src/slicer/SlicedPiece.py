@@ -58,6 +58,43 @@ class SlicedPiece(SlicedObject):
 
         return fiber_paths
 
+    @staticmethod
+    def save_fiber_paths(
+        fiber_paths: dict[int, np.ndarray],
+        directory: Path,
+        layer: int = 1,
+        normals: dict[int, np.ndarray] | None = None,
+        fmt: str = "%.5f",
+    ) -> list[Path]:
+        """
+        Save the fiber paths of a given layer to "fibers/layer_<layer>"
+        CSV files, in the same format as the oamc export (x, y, z, nx, ny,
+        nz): the files are named fiber_<layer>_<i>.csv and can be reloaded
+        with load_fiber_paths.
+
+        `normals` optionally provides one unit vector per point of each
+        fiber (same keying as fiber_paths); when omitted, the normals are
+        written as zeros.
+        """
+        layer_dir = Path(directory) / f"fibers/layer_{layer}"
+        layer_dir.mkdir(parents=True, exist_ok=True)
+
+        written = []
+        for i, path in fiber_paths.items():
+            points = np.asarray(path, dtype=float)
+            if normals is not None and i in normals:
+                n = np.asarray(normals[i], dtype=float)
+            else:
+                n = np.zeros_like(points)
+            rows = np.hstack([points, n])
+
+            csv_file = layer_dir / f"fiber_{layer}_{i}.csv"
+            with open(csv_file, mode="w", encoding="utf-8", newline="") as file:
+                np.savetxt(file, rows, delimiter=",", fmt=fmt)
+            written.append(csv_file)
+
+        return written
+
     @property
     def fiber_mean_direction(self) -> np.ndarray:
         """
@@ -102,20 +139,52 @@ class SlicedPiece(SlicedObject):
     # Slicing planes
     # ------------------------------------------------------------------
 
-    def generate_slicing_planes(self, i_surface: int = 0, spacing: float = 0.5):
+    def generate_slicing_planes(
+        self,
+        i_surface: int = 0,
+        spacing: float = 0.5,
+        direction_mode: str = "fiber",
+    ):
         """
-        Generate the infill slicing planes for this layer, alternating the
-        45-degree offset direction (relative to the mean fiber direction)
-        every other layer. `spacing` is the distance between two planes.
-        """
-        mean_dir = self.fiber_mean_direction
-        n = self.normal
+        Generate the infill slicing planes for this layer. `spacing` is
+        the distance between two planes.
 
-        sign = 1.0 if i_surface % 2 == 0 else -1.0
-        direction = (
-            np.cos(np.deg2rad(45)) * mean_dir
-            + sign * np.sin(np.deg2rad(45)) * np.cross(n, mean_dir)
-        )
+        direction_mode selects the infill direction (projected on the
+        layer plane):
+          "fiber": 45 degrees relative to the mean fiber direction,
+                   alternating +/-45 every other layer (historical
+                   behaviour, `i_surface` controls the alternation);
+          "extent": axis-aligned with the LARGEST X/Y extent of the layer
+                   (X for a long piece along X, Y otherwise), so the
+                   infill runs along the longest dimension;
+          "0" / "90": absolute 0 or 90 degrees in the part frame
+                   (world X / world Y). `i_surface` is ignored.
+        """
+        n = self.normal
+        mode = str(direction_mode).lower()
+
+        if mode == "fiber":
+            mean_dir = self.fiber_mean_direction
+            sign = 1.0 if i_surface % 2 == 0 else -1.0
+            direction = (
+                np.cos(np.deg2rad(45)) * mean_dir
+                + sign * np.sin(np.deg2rad(45)) * np.cross(n, mean_dir)
+            )
+        elif mode == "extent":
+            pts = self.surface.points
+            span_x = pts[:, 0].max() - pts[:, 0].min()
+            span_y = pts[:, 1].max() - pts[:, 1].min()
+            direction = np.array([1.0, 0.0, 0.0]) if span_x >= span_y else np.array([0.0, 1.0, 0.0])
+        elif mode in ("0", "0deg", "0°"):
+            direction = np.array([1.0, 0.0, 0.0])
+        elif mode in ("90", "90deg", "90°"):
+            direction = np.array([0.0, 1.0, 0.0])
+        else:
+            raise ValueError(
+                f"direction_mode must be 'fiber', 'extent', '0' or '90', got {direction_mode!r}"
+            )
+
+        direction = direction - (direction @ n) * n
         direction /= np.linalg.norm(direction)
 
         # Slicing plane normal
@@ -370,6 +439,7 @@ class SlicedPiece(SlicedObject):
         """
         target = np.array([0, 0, 1])
         mean_normal = -1 * SlicedPiece.get_mean_surface_normals(model, surfaces)
+        mean_normal = mean_normal / np.linalg.norm(mean_normal)
         axis = np.cross(mean_normal, target)
         axis_norm = np.linalg.norm(axis)
 
@@ -394,12 +464,14 @@ class SlicedPiece(SlicedObject):
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
         merge_tolerance: float = 0.1,
+        direction_mode: str = "fiber",
     ):
         """
-        Build the full printing path for this piece layer: fiber-aligned
-        infill lines (cut from the inner offset zone by the fiber-aligned
-        slicing planes) plus distance-to-boundary contour shells, stitched
-        together as in build_full_printing_path.
+        Build the full printing path for this piece layer: infill lines
+        (cut from the inner offset zone by the slicing planes, direction
+        set by `direction_mode`, see generate_slicing_planes) plus
+        distance-to-boundary contour shells, stitched together as in
+        build_full_printing_path.
         """
         # Merge coincident points first: an isosurface extracted from the
         # model's grid can have duplicate points along its boundary, which
@@ -409,7 +481,9 @@ class SlicedPiece(SlicedObject):
         # (normals, distance field), since the point indexing changes.
         self.surface = self.surface.merge_points(tolerance=merge_tolerance)
 
-        planes = self.generate_slicing_planes(i_surface=i_surface)
+        planes = self.generate_slicing_planes(
+            i_surface=i_surface, direction_mode=direction_mode
+        )
         inner_zone = self.build_offset_surface(contour_width, invert=False)
 
         # Single-pass cut of the inner zone with all the planes
@@ -428,7 +502,7 @@ class SlicedPiece(SlicedObject):
         )
 
     @classmethod
-    def export_layers_to_txt(
+    def export_layers_to_csv(
         cls,
         pieces: list["SlicedPiece"],
         filepath,
@@ -436,19 +510,21 @@ class SlicedPiece(SlicedObject):
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
-        include_orientation: bool = False,
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
+        direction_mode: str = "fiber",
     ) -> None:
         """
         Build the full printing path for every given piece layer and
         write the whole trajectory (all layers, in order) to a single
-        text file, ready to be loaded by an external trajectory simulator
+        CSV file, ready to be loaded by an external trajectory simulator
         such as RoboDK.
 
         simplify_tolerance: when given, each segment is simplified with
         Ramer-Douglas-Peucker (see SlicedObject.simplify_polyline) before
         being written out, to shrink the exported file/robot program.
+        direction_mode: infill direction, see generate_slicing_planes
+        ('fiber', 'extent', '0' or '90').
         """
         filepath = Path(filepath)
 
@@ -459,14 +535,14 @@ class SlicedPiece(SlicedObject):
                 approach_distance=approach_distance,
                 max_connection_length=max_connection_length,
                 contour_isovalues=contour_isovalues,
+                direction_mode=direction_mode,
             )
 
             piece.export_printing_path(
                 segments,
                 types,
                 filepath,
-                include_orientation=include_orientation,
-                approach_sign=approach_sign,
+                include_normal=include_normal,
                 simplify_tolerance=simplify_tolerance,
                 layer_id=i,
                 mode="w" if i == 0 else "a",
