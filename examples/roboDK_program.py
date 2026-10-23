@@ -1,4 +1,8 @@
-"""Generate a RoboDK program: full mold, then 1st plastic layer, then 1st carbon fiber layer on top.
+"""Generate RoboDK programs for the two printheads:
+  - plastic: PrintMold (optional) + PrintPlasticLayer<i>, ONE PROGRAM PER
+    LAYER, so each layer gets its own machine code (.src) when the programs
+    are post-processed;
+  - carbon fibers: PrintCarbon (single program).
 
 Usage: open RobotPrint_Printhead.rdk in RoboDK, then run this script (RoboDK must be running).
 Units: mm. The HORST KRL calls (horst_*, bosch_retract, reset_sps) only appear in the
@@ -17,14 +21,6 @@ tangent is used: the rotation about the nozzle axis is kept as constant as
 possible (TCP X = projection of a fixed reference vector, see FIXED_X),
 which avoids the tool spinning about its nozzle and the IK/simulation
 errors that come with it.
-
-Two different printheads are used: the thermoplastic one (mold + piece)
-and the composite/fiber one. They are two separate RoboDK tools whose TCP
-conventions differ (the X of one matches the Z of the other), so the poses
-are remapped per phase onto each tool's real nozzle axis
-(NOZZLE_TCP_AXIS_PLASTIC / NOZZLE_TCP_AXIS_FIBER) and the program emits a
-real tool change (setPoseTool) at the plastic -> fiber transition
-(PLASTIC_TOOL_NAME / FIBER_TOOL_NAME).
 """
 from __future__ import annotations
 
@@ -46,10 +42,6 @@ import numpy as np
 FIBERS_DIR = "fibers_transformed"
 PIECE_FILE = "piece_path.csv"        # plastic piece: printed after the mold
 MOLD_FILE = "mold_path.txt"         # optional: printed first if present
-PLASTIC_TOOL_NAME = ""              # station tool for the thermoplastic printhead
-                                    # ("" = the tool currently attached to the robot)
-FIBER_TOOL_NAME = "Fiber Tool"      # station tool for the composite/fiber printhead
-                                    # ("" = same tool as the plastic, no tool change)
 PRINT_MOLD = True                   # False: skip the mold even if present
 
 PLASTIC_LAYERS = "first"           # "first" = first layer found; "all" = every layer in
@@ -93,14 +85,7 @@ FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 # part) is carried by the tool's +X, and the tool's Z keeps the "print
 # plane" direction (the built +X). Check in RoboDK: the nozzle must end
 # up perpendicular to the printed surface, pointing at it.
-#
-# The plastic printhead and the fiber printhead are two DIFFERENT RoboDK
-# tools, and their TCP conventions differ (the X of one matches the Z of
-# the other), so each phase gets its own setting:
-NOZZLE_TCP_AXIS_PLASTIC = "x"    # thermoplastic tool (mold + piece): nozzle axis
-NOZZLE_TCP_AXIS_FIBER = "z"     # composite/fiber tool: nozzle axis
-# Aliases for readability below.
-NOZZLE_TCP_AXIS = NOZZLE_TCP_AXIS_PLASTIC
+NOZZLE_TCP_AXIS = "x"
 
 # --- Plastic ---
 MIN_STEP = 0.05                     # mm: minimum distance between two kept points
@@ -223,8 +208,6 @@ class Move:
     rounding: float
     label: str
     is_print: bool = False                   # True: material is being deposited (trace on)
-    tool: str = "plastic"                    # "plastic" | "fiber": which printhead
-    layer: int | None = None                 # layer id (piece layer / fiber layer)
     pre: list = field(default_factory=list)     # ("comment"|"code"|"pause", value)
     post: list = field(default_factory=list)
 
@@ -577,7 +560,6 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
             rounding=ROUNDING if (t == "curve" and nxt in PRINT_TYPES) else 0,
             label=f"{prefix}{t} x={p.points[i,0]:.1f} y={p.points[i,1]:.1f} z={p.points[i,2]:.1f}",
             is_print=printing,
-            layer=int(layers[i]),
             pre=pre, post=[]))
     if printing_prev:
         moves[-1].post.append(("code", FEED_OFF))
@@ -643,7 +625,7 @@ def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYER):
     return li, [p for _, p in files]
 
 
-def fiber_moves(files, layer=None):
+def fiber_moves(files):
     moves, polylines = [], []
     for path in files:
         P, N = load_fiber(path)
@@ -671,13 +653,13 @@ def fiber_moves(files, layer=None):
         moves.append(Move(
             pose=hop(T[0]), speed=SPEED_TRAVEL, rounding=0,
             pre=[("comment", f"{name} - {L:.0f} mm, {'fiber' if with_fibre else 'NO fiber (too short)'}")],
-            label=f"{name} start retreat", layer=layer))
+            label=f"{name} start retreat"))
         # 2) fiber start; extrusion starts once arrived
         speed = SPEED_FIBER if with_fibre else SPEED_FIBER_NO_FIBRE
         moves.append(Move(
             pose=T[idx[0]], speed=SPEED_TRAVEL, rounding=0,
             post=[("code", FIBER_ON if with_fibre else FIBER_ON_NO_FIBRE)],
-            label=f"{name} start", layer=layer))
+            label=f"{name} start"))
         # 3) laydown (always printing while the fiber is being laid)
         for k, i in enumerate(idx[1:], start=1):
             last = (k == len(idx) - 1)
@@ -690,10 +672,10 @@ def fiber_moves(files, layer=None):
             moves.append(Move(
                 pose=T[i], speed=speed,
                 rounding=0 if (last or is_cut) else FIBER_ROUNDING,
-                label=f"{name} pt {i}", is_print=True, layer=layer, post=post))
+                label=f"{name} pt {i}", is_print=True, post=post))
         # 4) retreat after the end
         moves.append(Move(pose=hop(T[idx[-1]]), speed=SPEED_TRAVEL, rounding=0,
-                          label=f"{name} end retreat", layer=layer))
+                          label=f"{name} end retreat"))
         print(f"  {name}: {len(P)} points -> {len(idx)} kept, length {L:.0f} mm"
               f"{'' if with_fibre else ' (no fiber)'}"
               f"{f', cut at point {cut_i}' if cut_i is not None else ''}")
@@ -747,7 +729,7 @@ def main(argv=None):
 
     # --- mold (optional): printed first, plastic only ---
     mold_moves, mold_runs = [], []
-    if args.print_mold:
+    if args.print_mold and args.programs in ("both", "plastic"):
         mold_file = resolve_data_file(args.mold, bases)
         if os.path.isfile(mold_file):
             mold = load_mold(mold_file, lift=args.lift_travel)
@@ -756,79 +738,79 @@ def main(argv=None):
         else:
             print(f"Mold skipped: file {mold_file} not found")
 
-    plastic = load_plastic(piece_file, plastic_layers(args), lift=args.lift_travel)
-    moves, plastic_runs = plastic_moves(plastic)
+    # --- plastic: one move list per layer -> one RoboDK program per layer,
+    # so each layer is post-processed into its own machine code ---
+    plastic_sections = []           # (program name, moves, trace runs)
+    if args.programs in ("both", "plastic"):
+        plastic = load_plastic(piece_file, plastic_layers(args), lift=args.lift_travel)
 
-    # Orientation diagnostics: mean exported normal vs the nozzle axis of
-    # the first piece move (before the NOZZLE_TCP_AXIS remap, the nozzle
-    # axis is the built TCP Z = PIECE_TOOL_SIGN * normal). If the tool axis
-    # looks wrong in the simulation, compare these two lines first: a sign
-    # convention mismatch shows up as dot(z_tcp, mean_normal) ~= +1 instead
-    # of -1 (fix: PIECE_TOOL_SIGN = +1), and an axis mismatch means the
-    # station tool's nozzle axis is not its Z (fix: NOZZLE_TCP_AXIS).
-    if plastic.normals is not None and len(moves):
-        mean_n = plastic.normals.mean(axis=0)
-        mean_n = mean_n / np.linalg.norm(mean_n)
-        nozzle = moves[0].pose[:3, 2]
-        print(f"Orientation check: mean exported normal  = {np.round(mean_n, 3).tolist()}")
-        print(f"Orientation check: built nozzle axis (Z)  = {np.round(nozzle, 3).tolist()} "
-              f"(dot with normal: {float(np.dot(nozzle, mean_n)):+.2f}, "
-              f"expected {PIECE_TOOL_SIGN:+d}; remapped onto TCP "
-              f"{NOZZLE_TCP_AXIS.upper()})")
+        layer_order = []
+        for li in plastic.layers:
+            li = int(li)
+            if li not in layer_order:
+                layer_order.append(li)
 
-    fiber_layer, files = find_fiber_files(fibers_dir, args.fiber_layer)
-    fmoves, fiber_lines = fiber_moves(files, layer=fiber_layer)
+        for li in layer_order:
+            sel = plastic.layers == li
+            sub = PlasticPath(
+                points=plastic.points[sel], types=plastic.types[sel],
+                layers=plastic.layers[sel],
+                normals=plastic.normals[sel] if plastic.normals is not None else None,
+                source=plastic.source)
+            moves, runs = plastic_moves(sub, prefix=f"plastic L{li} ")
 
-    # Group the moves into per-layer programs. Each group keeps the tool of
-    # its phase (plastic printhead for the mold and the piece layers, fiber
-    # printhead for the fiber layer) and ends with a vertical lift, so the
-    # programs can be run one after the other in the station.
-    sections = []           # (name, tool_kind, moves)
+            # Orientation diagnostics (first layer only): mean exported
+            # normal vs the nozzle axis of the first move (before the
+            # NOZZLE_TCP_AXIS remap, the nozzle axis is the built TCP Z =
+            # PIECE_TOOL_SIGN * normal). A sign convention mismatch shows
+            # up as dot ~= +1 instead of -1 (fix: PIECE_TOOL_SIGN = +1);
+            # an axis mismatch means the station tool's nozzle axis is not
+            # its Z (fix: NOZZLE_TCP_AXIS).
+            if li == layer_order[0] and plastic.normals is not None and len(moves):
+                mean_n = plastic.normals.mean(axis=0)
+                mean_n = mean_n / np.linalg.norm(mean_n)
+                nozzle = moves[0].pose[:3, 2]
+                print(f"Orientation check: mean exported normal  = {np.round(mean_n, 3).tolist()}")
+                print(f"Orientation check: built nozzle axis (Z)  = {np.round(nozzle, 3).tolist()} "
+                      f"(dot with normal: {float(np.dot(nozzle, mean_n)):+.2f}, "
+                      f"expected {-PIECE_TOOL_SIGN:+d}; remapped onto TCP "
+                      f"{NOZZLE_TCP_AXIS.upper()})")
 
-    if mold_moves:
-        lift = mold_moves[-1].pose.copy()
-        lift[2, 3] += LIFT_Z
-        mold_moves.append(Move(
-            pose=lift, speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", "mold done: lift before the part")],
-            label="lift after mold"))
-        sections.append(("PrintMold", "plastic", mold_moves))
+            # vertical lift at the end of the layer (clear of the part)
+            lift = moves[-1].pose.copy()
+            lift[2, 3] += LIFT_Z
+            moves.append(Move(
+                pose=lift, speed=SPEED_TRAVEL, rounding=0,
+                pre=[("comment", f"layer {li} done: lift")],
+                label=f"lift after layer {li}"))
+            plastic_sections.append((f"PrintPlasticLayer{li}", moves, runs))
 
-    # piece: one program per layer, in trajectory order
-    piece_layers = []
-    for mv in moves:
-        li = mv.layer if mv.layer is not None else 0
-        if not piece_layers or piece_layers[-1][0] != li:
-            piece_layers.append((li, []))
-        piece_layers[-1][1].append(mv)
-    for li, layer_moves in piece_layers:
-        lift = layer_moves[-1].pose.copy()
-        lift[2, 3] += LIFT_Z
-        layer_moves.append(Move(
-            pose=lift, speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", f"layer {li} done: lift")],
-            label=f"lift after layer {li}"))
-        sections.append((f"PrintPlasticLayer{li}", "plastic", layer_moves))
+        # mold (optional) first, before the first plastic layer
+        if mold_moves:
+            lift = mold_moves[-1].pose.copy()
+            lift[2, 3] += LIFT_Z
+            mold_moves.append(Move(
+                pose=lift, speed=SPEED_TRAVEL, rounding=0,
+                pre=[("comment", "mold done: lift before the part")],
+                label="lift after mold"))
+            plastic_sections.insert(0, ("PrintMold", mold_moves, mold_runs))
 
-    if fmoves:
-        lift = fmoves[-1].pose.copy()
-        lift[2, 3] += LIFT_Z
-        fmoves.append(Move(
-            pose=lift, speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", "extruder change: plastic -> composite")],
-            label="lift before fibers"))
-        sections.append((f"PrintCarbonLayer{fiber_layer}", "fiber", fmoves))
+    # --- carbon fibers: single program ---
+    fiber_section = None
+    if args.programs in ("both", "carbon"):
+        _, files = find_fiber_files(fibers_dir, args.fiber_layer)
+        fmoves, fiber_lines = fiber_moves(files)
+        fiber_section = ("PrintCarbon", fmoves, fiber_lines)
 
-    # termination: heaters off etc., emitted after the last program's last move
-    sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
-
-    # The two printheads are different RoboDK tools with different TCP
-    # conventions (the X of one matches the Z of the other): remap the
-    # poses per section, onto the nozzle axis of the section's tool.
-    for name, kind, section_moves in sections:
-        axis = NOZZLE_TCP_AXIS_FIBER if kind == "fiber" else NOZZLE_TCP_AXIS_PLASTIC
-        for mv in section_moves:
-            mv.pose = remap_nozzle_axis(mv.pose, axis)
+    # Remap every pose onto the station tool's real nozzle axis (the poses
+    # are built with Z = approach; NOZZLE_TCP_AXIS says which TCP axis
+    # carries the nozzle in the station tool frame).
+    for _, moves, _ in plastic_sections:
+        for mv in moves:
+            mv.pose = remap_nozzle_axis(mv.pose, NOZZLE_TCP_AXIS)
+    if fiber_section is not None:
+        for mv in fiber_section[1]:
+            mv.pose = remap_nozzle_axis(mv.pose, NOZZLE_TCP_AXIS)
 
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
@@ -836,18 +818,6 @@ def main(argv=None):
     tool = robot.getLink(robolink.ITEM_TYPE_TOOL)
     if not tool.Valid():
         raise SystemExit("No tool attached to the robot: attach the printhead in RoboDK")
-
-    # Fiber printhead: a second station tool. When configured, the program
-    # emits a real tool change at the plastic -> fiber transition; the
-    # fiber moves are then expressed in this tool's TCP (whose convention
-    # differs from the plastic tool: NOZZLE_TCP_AXIS_FIBER).
-    fiber_tool = tool
-    if FIBER_TOOL_NAME:
-        fiber_tool = RDK.Item(FIBER_TOOL_NAME, robolink.ITEM_TYPE_TOOL)
-        if not fiber_tool.Valid():
-            raise SystemExit(
-                f"No tool named {FIBER_TOOL_NAME!r} in the station: "
-                "create it or clear FIBER_TOOL_NAME to keep the plastic tool")
 
     frame = RDK.Item(FRAME_NAME, robolink.ITEM_TYPE_FRAME)
     if not frame.Valid():
@@ -861,10 +831,11 @@ def main(argv=None):
     print("Part frame (absolute):", np.round(frame.PoseAbs().Pos(), 1),
           "| robot base (absolute):", np.round(robot.PoseAbs().Pos(), 1))
 
-    # Delete the programs of a previous run (same naming scheme)
-    for it in RDK.ItemList(robolink.ITEM_TYPE_PROGRAM, False):
-        if it.Name().startswith(("PrintMold", "PrintPlasticLayer", "PrintCarbonLayer")):
-            it.Delete()
+    # Delete the previous run's programs by name prefix
+    for prefix in ("PrintMold", "PrintPlasticLayer", "PrintCarbon"):
+        for it in RDK.ItemList(robolink.ITEM_TYPE_PROGRAM, False):
+            if it.Name().startswith(prefix):
+                it.Delete()
 
     def mat(M):
         return robomath.Mat(M.tolist())
@@ -872,58 +843,64 @@ def main(argv=None):
     robot.setPoseFrame(frame)
     robot.setPoseTool(tool)
 
+    sections = plastic_sections + ([fiber_section] if fiber_section is not None else [])
+
     if args.check_reach:
-        # Per section, with the section's tool attached (the IK depends on
-        # the active TCP).
-        for name, kind, section_moves in sections:
-            section_tool = fiber_tool if kind == "fiber" else tool
-            robot.setPoseTool(section_tool)
-            tested = list(range(0, len(section_moves), CHECK_STEP))
+        for name, moves, _ in sections:
+            tested = list(range(0, len(moves), CHECK_STEP))
             bad = [k for k in tested
-                   if len(robot.SolveIK(mat(section_moves[k].pose)).rows) < 6]
+                   if len(robot.SolveIK(mat(moves[k].pose)).rows) < 6]
             print(f"IK test {name} ({len(tested)} moves tested): {len(bad)} unreachable")
             for k in bad[:8]:
-                p_abs = section_moves[k].pose[:3, 3] + np.array(frame.PoseAbs().Pos())
-                print(f"  move {k + 1}: {section_moves[k].label} "
+                p_abs = moves[k].pose[:3, 3] + np.array(frame.PoseAbs().Pos())
+                print(f"  move {k + 1}: {moves[k].label} "
                       f"-> absolute approx {np.round(p_abs, 1).tolist()}")
-        robot.setPoseTool(tool)
 
     if args.draw_curves:
-        draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
-        draw_curves(RDK, robolink, frame, plastic_runs, "PrintTrace", [1, 0, 0, 1])
-        draw_curves(RDK, robolink, frame, fiber_lines, "FiberTrace", [0, 0.3, 1, 1])
+        if mold_runs:
+            draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
+        for name, _, runs in plastic_sections:
+            if name != "PrintMold" and runs:
+                draw_curves(RDK, robolink, frame, runs, "PrintTrace", [1, 0, 0, 1])
+        if fiber_section is not None:
+            draw_curves(RDK, robolink, frame, fiber_section[2], "FiberTrace", [0, 0.3, 1, 1])
 
-    # Initialization (BAS block + printhead preparation) goes into the first
-    # program only, before any movement.
     if args.trace_only_print:
         ensure_trace_programs(RDK, robolink)
         RDK.Command("Trace", "Reset")      # clear previous traces
 
-    for si, (name, kind, section_moves) in enumerate(sections):
-        section_tool = fiber_tool if kind == "fiber" else tool
+    for s_i, (name, moves, _) in enumerate(sections):
+        first_section = s_i == 0
+        last_section = s_i == len(sections) - 1
+
+        # termination: heaters off etc., only in the LAST program
+        if last_section:
+            moves[-1].post += [("code", c) for c in TERMINATION_CODE]
+
         prog = RDK.AddProgram(name)
         prog.setPoseFrame(frame)
-        prog.setPoseTool(section_tool)
+        prog.setPoseTool(tool)
 
-        def emit(items, _prog=prog):
-            for kind_, val in items:
-                if kind_ == "comment":
-                    _prog.RunInstruction(val, robolink.INSTRUCTION_COMMENT)
-                elif kind_ == "code":
-                    _prog.RunInstruction(val, robolink.INSTRUCTION_INSERT_CODE)
-                elif kind_ == "pause":
-                    _prog.Pause(val)
+        def emit(items):
+            for kind, val in items:
+                if kind == "comment":
+                    prog.RunInstruction(val, robolink.INSTRUCTION_COMMENT)
+                elif kind == "code":
+                    prog.RunInstruction(val, robolink.INSTRUCTION_INSERT_CODE)
+                elif kind == "pause":
+                    prog.Pause(val)
 
-        if si == 0:
+        # Initialization: BAS block + printhead preparation, only in the
+        # FIRST program, before any movement
+        if first_section:
             emit([("comment", "--- Initialization ---")])
             emit([("code", c) for c in INIT_BAS_CODE])
             emit([("comment", "--- Printhead preparation ---")])
             emit([("code", c) for c in HEAD_INIT_CODE])
-        emit([("comment", f"--- {name} (tool: {section_tool.Name()}) ---")])
 
-        cur_speed = cur_round = None
         trace_on = None
-        for n, m in enumerate(section_moves):
+        cur_speed = cur_round = None
+        for n, m in enumerate(moves):
             if m.speed != cur_speed:
                 prog.setSpeed(m.speed)
                 cur_speed = m.speed
@@ -943,11 +920,12 @@ def main(argv=None):
             emit(m.post)
 
         try:
-            print(f"RoboDK check ({name}):", prog.Update()[-1])
+            print(f"RoboDK check {name}:", prog.Update()[-1])
         except Exception as e:
             print(f"prog.Update() unavailable for {name}:", e)
-        print(f"Program '{name}' created: {len(section_moves)} moves "
-              f"(tool: {section_tool.Name()}).")
+        print(f"Program '{name}' created: {len(moves)} moves. "
+              "Select it in RoboDK and simulate; post-process it to get its "
+              "own machine code.")
 
 
 def plastic_layers(args):
@@ -974,6 +952,11 @@ def parse_args(argv=None):
                         help="'first' or a fiber layer number")
     parser.add_argument("--mold", default=MOLD_FILE,
                         help="mold txt file (empty = skip the mold)")
+    parser.add_argument("--programs", default="both",
+                        choices=("both", "plastic", "carbon"),
+                        help="which programs to generate: plastic (mold + "
+                             "one PrintPlasticLayer<i> per layer), carbon "
+                             "(PrintCarbon fibers only), or both")
     # Boolean options: each one is a module constant by default, flipped
     # from the command line with the paired store_true / store_false flags
     # (e.g. --no-mold sets print_mold=False, --mold-print restores True).
