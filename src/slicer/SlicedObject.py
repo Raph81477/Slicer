@@ -40,7 +40,7 @@ class SlicedObject:
         # Any geometry-dependent cache is invalid once the mesh changes
         # (e.g. after merge_points, which also changes point indexing).
         self._surface = value
-        self._distance_tree_built = False
+        self._dist_to_boundary_computed = False
         self._cell_normals_cache = None
 
     @property
@@ -69,7 +69,7 @@ class SlicedObject:
         n = self._cell_normals.mean(axis=0)
         return n / np.linalg.norm(n)
 
-    def build_distance_tree(self) -> None:
+    def compute_dist_to_boundary(self) -> None:
         """
         Compute, for every point of the surface, the distance to the
         nearest boundary point, and store it as the "dist_to_boundary"
@@ -85,9 +85,9 @@ class SlicedObject:
         distances, _ = tree.query(self.surface.points, workers=-1)
 
         self.surface["dist_to_boundary"] = distances
-        self._distance_tree_built = True
+        self._dist_to_boundary_computed = True
 
-    def build_offset_surface(self, value: float, invert: bool = False) -> pv.PolyData:
+    def clip_by_dist_to_boundary(self, value: float, invert: bool = False) -> pv.PolyData:
         """
         Build a new surface whose boundary exactly matches the
         dist_to_boundary == value isoline.
@@ -98,8 +98,8 @@ class SlicedObject:
         invert=True : keep the zone dist_to_boundary <= value (border strip)
         invert=False (default): keep the zone dist_to_boundary >= value (inner zone)
         """
-        if not self._distance_tree_built:
-            self.build_distance_tree()
+        if not self._dist_to_boundary_computed:
+            self.compute_dist_to_boundary()
 
         # clip_scalar re-triangulates every cell crossed by "value", so the
         # resulting boundary lies exactly on the isovalue.
