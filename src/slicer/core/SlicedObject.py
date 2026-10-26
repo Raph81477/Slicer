@@ -26,6 +26,10 @@ class SlicedObject:
 
     def __init__(self, surface: pv.PolyData):
         self.surface = surface  # goes through the setter below
+        # Optional kwargs forwarded to extract_feature_edges in
+        # build_distance_tree (feature_angle, boundary_edges, ...
+        # ). Empty dict = PyVista defaults, i.e. the historical behaviour.
+        self.feature_edge_params: dict = {}
 
     # ------------------------------------------------------------------
     # Surface + cache management
@@ -75,7 +79,7 @@ class SlicedObject:
         nearest boundary point, and store it as the "dist_to_boundary"
         scalar field on the surface.
         """
-        edges = self.surface.extract_feature_edges()
+        edges = self.surface.extract_feature_edges(**self.feature_edge_params)
         boundary_points = edges.points
         if len(boundary_points) == 0:
             raise ValueError("Surface has no boundary/feature edges: cannot compute dist_to_boundary.")
