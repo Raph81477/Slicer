@@ -1,9 +1,9 @@
 """Fiber path tuning tab (OAMC pipeline) for the slicer GUI.
 
 Reproduces the functional pipeline of the standalone OAMC fiber tuner
-(bearing load, mold selection, least-squares fiber optimization, load
-paths, post-processing and fiber export) inside a dedicated tab of the
-slicer GUI. Only the functions are reused, not the original layout.
+(mold selection, least-squares fiber optimization, post-processing and
+fiber export) inside a dedicated tab of the slicer GUI. Only the
+functions are reused, not the original layout.
 """
 
 from __future__ import annotations
@@ -18,11 +18,10 @@ import numpy as np
 
 try:
     from oamc.core import CompositeMaterial, CompositeModel
-    from oamc.enums import AngleUnit, Direction, ProjectionMethod
+    from oamc.enums import AngleUnit, ProjectionMethod
     from oamc.fem.material import IsotropicMaterial, TransverselyIsotropicMaterial
     from oamc.integrations.ansys.parser import APDLParser
     from oamc.logging import enable_logging
-    from oamc.lpp import LPP
     from oamc.post import Viewer
 
     OAMC_OK = True
@@ -44,7 +43,6 @@ class FiberTuningTab(ttk.Frame):
         self._running = False
         self._model = None
         self._viewer = None
-        self._lpp = None
         self._data: list[dict] = []
 
     # ==================================================================
@@ -55,17 +53,10 @@ class FiberTuningTab(ttk.Frame):
         v = self.vars
 
         # Pipeline / example selection
-        v["example"] = StringVar(value="fdm")  # "lpp" | "fdm" | "fdm_csv"
+        v["example"] = StringVar(value="fdm")  # "fdm" | "fdm_csv"
 
         # Output
         v["out_dir"] = StringVar(value=str(Path.home() / "oamc_output"))
-
-        # Bearing load
-        v["apply_load"] = BooleanVar(value=True)
-        v["hole_ns"] = StringVar(value="HOLE")
-        v["fx"] = DoubleVar(value=0.0)
-        v["fy"] = DoubleVar(value=-1000.0)
-        v["fz"] = DoubleVar(value=0.0)
 
         # Mold
         v["use_mold"] = BooleanVar(value=True)
@@ -82,13 +73,6 @@ class FiberTuningTab(ttk.Frame):
         v["rdp_dev"] = DoubleVar(value=0.05)
         v["out_maxl"] = DoubleVar(value=10.0)
         v["out_ang"] = DoubleVar(value=45.0)
-
-        # Load paths (LPP)
-        v["use_seeds_file"] = BooleanVar(value=True)
-        v["seeds_path"] = StringVar(value=str(Path.home() / "seeds.txt"))
-        v["seeds_ns"] = StringVar(value="SEEDS")
-        v["direction"] = StringVar(value="MAX")
-        v["step_size"] = DoubleVar(value=1.0)
 
         # Visualization
         v["opacity"] = DoubleVar(value=0.3)
@@ -119,14 +103,13 @@ class FiberTuningTab(ttk.Frame):
         ttk.Combobox(
             f,
             textvariable=v["example"],
-            values=("lpp", "fdm", "fdm_csv"),
+            values=("fdm", "fdm_csv"),
             state="readonly",
             width=12,
         ).grid(row=0, column=1, sticky="w")
         ttk.Label(
             f,
-            text="lpp = load paths (needs seeds), fdm = FDM fiber paths, "
-                 "fdm_csv = FDM + compliance/convergence CSV.",
+            text="fdm = FDM fiber paths, fdm_csv = FDM + compliance/convergence CSV.",
         ).grid(row=0, column=2, sticky="w", padx=8)
 
         ttk.Label(f, text="Output directory:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
@@ -156,22 +139,6 @@ class FiberTuningTab(ttk.Frame):
         right.pack(side="left", fill=X, expand=True)
 
         # --- Left column ---
-        f = ttk.LabelFrame(left, text="Bearing load")
-        f.pack(fill=X, pady=4)
-        f.columnconfigure(1, weight=1)
-        ttk.Checkbutton(
-            f, text="Apply bearing load", variable=v["apply_load"]
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=4)
-        ttk.Label(f, text="Named selection:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(f, textvariable=v["hole_ns"]).grid(row=1, column=1, sticky="ew")
-        for i, (key, label) in enumerate([
-            ("fx", "Fx [N]"), ("fy", "Fy [N]"), ("fz", "Fz [N]"),
-        ], start=2):
-            ttk.Label(f, text=label).grid(row=i, column=0, sticky="w", padx=4, pady=2)
-            ttk.Spinbox(f, from_=-1e6, to=1e6, increment=10.0, textvariable=v[key], width=10).grid(
-                row=i, column=1, sticky="w"
-            )
-
         f = ttk.LabelFrame(left, text="Mold (surface mesh)")
         f.pack(fill=X, pady=4)
         f.columnconfigure(1, weight=1)
@@ -212,31 +179,6 @@ class FiberTuningTab(ttk.Frame):
             ).grid(row=i, column=1, sticky="w")
 
         # --- Right column ---
-        f = ttk.LabelFrame(right, text="Load paths (lpp pipeline)")
-        f.pack(fill=X, pady=4)
-        f.columnconfigure(1, weight=1)
-        ttk.Checkbutton(
-            f, text="Seeds from file", variable=v["use_seeds_file"]
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=4)
-        ttk.Label(f, text="seeds.txt:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(f, textvariable=v["seeds_path"]).grid(row=1, column=1, sticky="ew")
-        ttk.Button(
-            f, text="Browse…", command=lambda: self._browse_file(v["seeds_path"])
-        ).grid(row=1, column=2, padx=4)
-        ttk.Label(f, text="Seeds named selection (if no file):").grid(
-            row=2, column=0, sticky="w", padx=4, pady=2
-        )
-        ttk.Entry(f, textvariable=v["seeds_ns"]).grid(row=2, column=1, sticky="ew")
-        ttk.Label(f, text="Direction:").grid(row=3, column=0, sticky="w", padx=4, pady=2)
-        ttk.Combobox(
-            f, textvariable=v["direction"], values=("MAX", "MIN", "MID"),
-            state="readonly", width=8,
-        ).grid(row=3, column=1, sticky="w")
-        ttk.Label(f, text="Step size [mm]:").grid(row=4, column=0, sticky="w", padx=4, pady=2)
-        ttk.Spinbox(
-            f, from_=0.1, to=20.0, increment=0.1, textvariable=v["step_size"], width=10
-        ).grid(row=4, column=1, sticky="w")
-
         f = ttk.LabelFrame(right, text="Visualization (OAMC Viewer)")
         f.pack(fill=X, pady=4)
         f.columnconfigure(1, weight=1)
@@ -340,11 +282,10 @@ class FiberTuningTab(ttk.Frame):
         error = None
         try:
             from oamc.core import CompositeMaterial, CompositeModel
-            from oamc.enums import AngleUnit, Direction, ProjectionMethod
+            from oamc.enums import AngleUnit, ProjectionMethod
             from oamc.fem.material import IsotropicMaterial, TransverselyIsotropicMaterial
             from oamc.integrations.ansys.parser import APDLParser
             from oamc.logging import enable_logging
-            from oamc.lpp import LPP
             from oamc.post import Viewer
 
             # Shared parameters from the slicer tabs
@@ -361,21 +302,11 @@ class FiberTuningTab(ttk.Frame):
             self.log("Parsing the .dat model…")
             parser = APDLParser(dat_path)
 
-            if params["apply_load"]:
-                force = (params["fx"], params["fy"], params["fz"])
-                parser.apply_bearing_load(force=force, target=params["hole_ns"])
-                self.log(f"Bearing load applied: {force} N -> '{params['hole_ns']}'")
-            else:
-                self.log("Bearing load disabled (load read from the .dat file).")
-
             example = params["example"]
-            if example == "lpp":
-                self._run_load_paths(parser, params, out_path)
-            else:
-                self._run_fdm(
-                    parser, params, out_path, app_params,
-                    with_csv=(example == "fdm_csv"),
-                )
+            self._run_fdm(
+                parser, params, out_path, app_params,
+                with_csv=(example == "fdm_csv"),
+            )
         except Exception:
             error = traceback.format_exc().strip().splitlines()[-1]
             self.log("ERROR (fiber pipeline):")
@@ -452,41 +383,6 @@ class FiberTuningTab(ttk.Frame):
             opacity=params["opacity"],
             paths=paths,
         )
-
-    # ------------------------------------------------------------------
-    def _run_load_paths(self, parser, params, out_path: Path) -> None:
-        from oamc.enums import Direction
-        from oamc.lpp import LPP
-
-        self.log("Pipeline: load paths (LPP)")
-        model, n2i, _ = parser.get_solid_model()
-
-        if params["use_seeds_file"]:
-            seeds = Path(params["seeds_path"])
-            if not seeds.is_file():
-                raise FileNotFoundError(f"seeds file not found: {seeds}")
-        else:
-            seed_nums = parser.get_named_selection(params["seeds_ns"])
-            seed_idx = [n2i[n] for n in seed_nums]
-            seeds = model.mesh.nodes[seed_idx]
-            self.log(f"Seeds: {len(seeds)} nodes from '{params['seeds_ns']}'")
-
-        dir_map = {"MAX": Direction.MAX, "MIN": Direction.MIN, "MID": Direction.MID}
-        direction = dir_map.get(params["direction"], Direction.MAX)
-
-        lpp = LPP(model)
-        self._lpp = lpp
-        lpp.generate_load_paths(
-            direction=direction,
-            step_size=params["step_size"],
-            seeds=seeds,
-        )
-        self.log(f"{len(lpp.paths)} load paths generated.")
-
-        lpp.save_load_paths(directory=out_path / "paths", file_format="CSV")
-        self.log(f"Load paths saved to {out_path / 'paths'}")
-
-        self._view(model, params, lpp.paths, "OAMC — Load Paths")
 
     # ------------------------------------------------------------------
     def _run_fdm(self, parser, params, out_path: Path, app_params, with_csv: bool) -> None:
