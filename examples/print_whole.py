@@ -30,7 +30,7 @@ NOZZLE_DIAMETER = 0.70
 INFILL_PERCENTAGE = 5.0
 PLANE_Z = 0.0
 OFFSET_FACES = 0.05
-LIFT_OFFSET = 20.0
+LIFT_OFFSET = 0.0
 
 PATH_COLORS = {
     "curve": "blue",
@@ -52,7 +52,7 @@ FIBER_COLORS = [
 
 
 def build_model() -> CompositeModel:
-    parser = APDLParser(DIR / "c_beam_large_thin.dat")
+    parser = APDLParser(DIR / "ds.dat")
 
     model = parser.get_solid_model()[0]
     mold = parser.get_surface_mesh("MOLD")[0]
@@ -84,7 +84,7 @@ def build_model() -> CompositeModel:
         dbc=model.dbc,
         nbc=model.nbc,
         fiber_diameter=NOZZLE_DIAMETER,
-        layer_height=0.35,
+        layer_height=1.0,
     )
 
     rot_mat = SlicedPiece.get_rotation_matrix(model)
@@ -352,7 +352,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--no-export-plastic",
-        action="store_true",
+        action="store_false",
         help=(
             "Skip the export of the plastic printing paths to "
             "the trajectory file (exported by default)."

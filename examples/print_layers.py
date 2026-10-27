@@ -22,7 +22,7 @@ def main() -> None:
 
     print(BANNER)
 
-    parser = APDLParser(DIR / "c_beam_large_thin.dat")
+    parser = APDLParser(DIR / "ds19-08.dat")
 
     model = parser.get_solid_model()[0]
     mold = parser.get_surface_mesh("MOLD")[0]
@@ -54,13 +54,13 @@ def main() -> None:
         dbc=model.dbc,
         nbc=model.nbc,
         fiber_diameter=0.70,
-        layer_height=0.35,
+        layer_height=1.0,
     )
 
     R = SlicedPiece.get_rotation_matrix(model)
     print(f"Rotation matrix:\n{R}")
     SlicedMold.rotate_model(model, R)
-    SlicedMold.lift_model(model, offset=20)
+    SlicedMold.lift_model(model, offset=0)
 
     viewer = Viewer(
         model=model,
@@ -91,7 +91,7 @@ def main() -> None:
     n_layers_to_plot = 2
 
     print("Total number of layers :", len(pieces))
-    for i, piece in enumerate(pieces[0:2]):
+    for i, piece in enumerate(pieces[0:1]):
 
         # Offset a copy of the surface along the normal, for visual
         # separation only.
