@@ -533,8 +533,7 @@ class SlicedPiece(SlicedObject):
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
-        include_orientation: bool = False,
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
         layer_width: float = 0.70,
     ) -> None:
@@ -542,7 +541,9 @@ class SlicedPiece(SlicedObject):
         Build the full printing path for every given piece layer and
         write the whole trajectory (all layers, in order) to a single
         text file, ready to be loaded by an external trajectory simulator
-        such as RoboDK.
+        such as RoboDK. Columns: x y z nx ny nz type layer — the full
+        tool orientation is rebuilt on the receiving end from the points
+        and the normals, exactly like the CSV export.
 
         layer_width sets the infill slicing plane spacing (one bead width),
         so infill and contour lines are evenly spaced.
@@ -567,8 +568,7 @@ class SlicedPiece(SlicedObject):
                 segments,
                 types,
                 filepath,
-                include_orientation=include_orientation,
-                approach_sign=approach_sign,
+                include_normal=include_normal,
                 simplify_tolerance=simplify_tolerance,
                 layer_id=i,
                 mode="w" if i == 0 else "a",
@@ -585,7 +585,7 @@ class SlicedPiece(SlicedObject):
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
         layer_width: float = 0.70,
     ) -> None:
@@ -599,12 +599,12 @@ class SlicedPiece(SlicedObject):
         Each CSV file holds one continuous path segment (curve, approach,
         leave or connection) with the columns
 
-            x, y, z, ux, uy, uz, vx, vy, vz, wx, wy, wz, type
+            x, y, z, nx, ny, nz, type
 
-        where (u, v, w) are the tool's X, Y, Z axes in world coordinates
-        (full rotation matrix columns, see export_path_to_txt) and `type`
-        is the segment type. Approach/leave/orientation conventions are
-        identical to export_layers_to_txt; only the file layout differs.
+        where (nx, ny, nz) is the local surface normal at that point and
+        `type` is the segment type. No tool axes are exported: the full
+        orientation is rebuilt on the receiving end (e.g. by the RoboDK
+        program), exactly like the txt export.
         """
         directory = Path(directory)
 
@@ -625,9 +625,7 @@ class SlicedPiece(SlicedObject):
 
             segments = piece.drop_shared_points(segments)
 
-            orientations = piece.compute_path_orientation(
-                segments, approach_sign=approach_sign
-            )
+            normals = piece.compute_path_normals(segments) if include_normal else None
 
             layer_dir = directory / f"layer_{i}"
             layer_dir.mkdir(parents=True, exist_ok=True)
@@ -637,16 +635,18 @@ class SlicedPiece(SlicedObject):
                 if len(seg) == 0:
                     continue
 
-                R = np.asarray(orientations[j - 1])
-                data = np.hstack(
-                    [seg, R.transpose(0, 2, 1).reshape(len(seg), 9)]
-                )
+                if normals is not None:
+                    n = np.asarray(normals[j - 1], dtype=float).reshape(len(seg), 3)
+                    data = np.hstack([seg, n])
+                else:
+                    data = seg
 
                 path = layer_dir / f"segment_{j}.csv"
                 with open(path, mode="w", encoding="utf-8", newline="") as f:
                     for row in data:
                         coords = ",".join(f"{v:.5f}" for v in row[:3])
-                        axes = ",".join(f"{v:.5f}" for v in row[3:])
-                        f.write(f"{coords},{axes},{seg_type}\n")
+                        if normals is not None:
+                            coords += "," + ",".join(f"{v:.5f}" for v in row[3:])
+                        f.write(f"{coords},{seg_type}\n")
 
         print(f"Piece path exported to {directory} ({len(pieces)} layers)")

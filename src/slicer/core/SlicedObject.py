@@ -442,150 +442,29 @@ class SlicedObject:
         return points[keep]
 
     @staticmethod
-    def compute_path_tangents(path_segments: list[np.ndarray]) -> list[np.ndarray]:
-        """
-        For every point of every segment, compute the unit tangent to the
-        trajectory (direction of travel): a central difference for
-        interior points, a one-sided difference at each segment's two
-        endpoints. This is the natural travel axis of a deposition tool.
-
-        Note: tangents are computed independently within each segment, so
-        there can be a small discontinuity right at a segment boundary
-        (e.g. curve -> connection) - this only affects the tool's rotation
-        about its approach axis at that single point, not its position.
-        """
-        tangents = []
-
-        for seg in path_segments:
-            seg = np.asarray(seg, dtype=float)
-            n = len(seg)
-
-            if n == 1:
-                # Degenerate single-point segment: direction is undefined,
-                # any unit vector will be re-orthogonalized later anyway.
-                tangents.append(np.array([[1.0, 0.0, 0.0]]))
-                continue
-
-            tan = np.empty_like(seg)
-            tan[1:-1] = seg[2:] - seg[:-2]
-            tan[0] = seg[1] - seg[0]
-            tan[-1] = seg[-1] - seg[-2]
-
-            norms = np.linalg.norm(tan, axis=1)
-            norms[norms < 1e-12] = 1.0
-            tangents.append(tan / norms[:, None])
-
-        return tangents
-
-    @staticmethod
-    def build_orthonormal_frames(
-        tangents: list[np.ndarray],
-        normals: list[np.ndarray],
-        approach_sign: float = -1.0,
-    ) -> list[np.ndarray]:
-        """
-        Combine, point by point, a travel-direction tangent and a surface
-        normal into a full right-handed orthonormal tool frame - i.e. the
-        rotation part of a robot pose.
-
-        - z_axis = approach_sign * normal. approach_sign=-1 (default)
-          points the tool's Z axis INTO the surface (the usual "approach"
-          convention); use +1 if your tool/robot convention points the
-          Z axis away from the surface instead.
-        - x_axis = the tangent, re-orthogonalized against z_axis via
-          Gram-Schmidt, so it always represents "direction of travel"
-          even where the raw tangent isn't perfectly perpendicular to the
-          normal. Where the tangent is nearly parallel to z_axis (e.g. a
-          straight approach/leave move, which travels along the normal
-          itself), an arbitrary perpendicular fallback is used instead,
-          since travel direction carries no meaningful orientation there.
-        - y_axis = z_axis x x_axis, so that (x_axis, y_axis, z_axis) is a
-          right-handed basis.
-
-        Because the tool is NOT rotationally symmetric about its approach
-        axis, this x_axis/y_axis choice matters mechanically, not just
-        for bookkeeping: it fixes the tool's rotation about its own axis,
-        so getting it wrong can mean the tool colliding with the part.
-
-        Returns one array per segment, of shape (n_points, 3, 3), where
-        frame[:, :, 0] is x_axis, frame[:, :, 1] is y_axis and
-        frame[:, :, 2] is z_axis - i.e. each frame[i] is a rotation
-        matrix whose columns are the tool's X, Y, Z axes in world
-        coordinates (the rotation part of a robot pose).
-
-        Performance: all points of all segments are processed together
-        with array operations (no per-point Python loop).
-        """
-        if len(tangents) == 0:
-            return []
-
-        lengths = [len(t) for t in tangents]
-        t = np.vstack(tangents).astype(float)
-        z = approach_sign * np.vstack(normals).astype(float)
-        z /= np.linalg.norm(z, axis=1, keepdims=True)
-
-        # Gram-Schmidt: remove the component of the tangent along z
-        x = t - np.sum(t * z, axis=1, keepdims=True) * z
-        x_norm = np.linalg.norm(x, axis=1)
-
-        # Tangent nearly parallel to z (straight approach/leave move):
-        # fall back to an arbitrary vector perpendicular to z.
-        degenerate = x_norm < 1e-8
-        if np.any(degenerate):
-            fallback = np.zeros_like(z)
-            fallback[:, 0] = 1.0
-            use_y = np.abs(z[:, 0]) > 0.9
-            fallback[use_y] = [0.0, 1.0, 0.0]
-
-            x_fb = fallback - np.sum(fallback * z, axis=1, keepdims=True) * z
-            x[degenerate] = x_fb[degenerate]
-            x_norm[degenerate] = np.linalg.norm(x_fb[degenerate], axis=1)
-
-        x /= x_norm[:, None]
-        y = np.cross(z, x)
-
-        # frames[i, :, 0] = x, frames[i, :, 1] = y, frames[i, :, 2] = z
-        frames = np.stack([x, y, z], axis=2)
-
-        return np.split(frames, np.cumsum(lengths)[:-1])
-
-    def compute_path_orientation(
-        self,
-        path_segments: list[np.ndarray],
-        approach_sign: float = -1.0,
-    ) -> list[np.ndarray]:
-        """
-        Convenience wrapper: compute the full tool orientation (rotation
-        matrix per point, see build_orthonormal_frames) for this layer's
-        path in one call.
-        """
-        normals = self.compute_path_normals(path_segments)
-        tangents = self.compute_path_tangents(path_segments)
-        return self.build_orthonormal_frames(tangents, normals, approach_sign=approach_sign)
-
-    @staticmethod
     def export_path_to_txt(
         path_segments: list[np.ndarray],
         segment_types: list[str],
         filepath,
-        orientations: list[np.ndarray] | None = None,
+        normals: list[np.ndarray] | None = None,
         layer_id=None,
         mode: str = "w",
     ) -> None:
         """
         Write an ordered printing path to a plain-text file, one point per
-        line: "x y z [ux uy uz vx vy vz wx wy wz] type [layer]", where
-        (u, v, w) are the tool's X, Y, Z axes in world coordinates - i.e.
-        a full robot pose, position plus orientation.
+        line: "x y z [nx ny nz] type [layer]", where (nx, ny, nz) is the
+        local surface normal at that point. No tool axes are exported: the
+        receiving end (e.g. a RoboDK program) builds the full orientation
+        itself from the points (travel direction) and the normal. Same
+        format as the CSV export, only the column separator differs.
 
         - path_segments / segment_types: as returned by
           build_full_printing_path (SlicedPiece) or build_support_path
           (SlicedMold).
-        - orientations: optional, same shape as path_segments, one 3x3
-          rotation matrix per point (see compute_path_orientation /
-          build_orthonormal_frames). When given, each point's tool X, Y,
-          Z axes are written right after its coordinates, ready to build
-          a 4x4 pose matrix on the receiving end (e.g. in RoboDK).
+        - normals: optional, same shape as path_segments, one unit
+          surface normal per point (see compute_path_normals). When
+          given, each point's normal is written right after its
+          coordinates.
         - layer_id: optional label (e.g. a layer index) written as a
           trailing column; handy when appending several layers to the
           same file so they stay distinguishable.
@@ -594,63 +473,91 @@ class SlicedObject:
           header. Use "a" from the second layer onward when building up
           a multi-layer trajectory file.
         """
+        SlicedObject._export_path(
+            path_segments, segment_types, filepath, normals, layer_id, mode, sep=" "
+        )
+
+    @staticmethod
+    def export_path_to_csv(
+        path_segments: list[np.ndarray],
+        segment_types: list[str],
+        filepath,
+        normals: list[np.ndarray] | None = None,
+        layer_id=None,
+        mode: str = "w",
+    ) -> None:
+        """
+        Comma-separated twin of export_path_to_txt: columns
+        "x,y,z,[nx,ny,nz],type[,layer]".
+        """
+        SlicedObject._export_path(
+            path_segments, segment_types, filepath, normals, layer_id, mode, sep=","
+        )
+
+    @staticmethod
+    def _export_path(
+        path_segments: list[np.ndarray],
+        segment_types: list[str],
+        filepath,
+        normals: list[np.ndarray] | None,
+        layer_id,
+        mode: str,
+        sep: str,
+    ) -> None:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         write_header = mode == "w" or not filepath.exists()
 
-        # One printf-style format per segment: the (constant) type and layer
-        # labels are baked into the format, so each segment is written with
-        # a single np.savetxt call instead of one f-string per point.
-        numeric_fmt = ["%.4f"] * 3
-        if orientations is not None:
-            numeric_fmt += ["%.6f"] * 9
-        layer_suffix = f" {layer_id}" if layer_id is not None else ""
+        layer_col = f"{sep}{layer_id}" if layer_id is not None else ""
 
         with open(filepath, mode, encoding="utf-8", newline="") as f:
             if write_header:
                 header = ["x", "y", "z"]
-                if orientations is not None:
-                    header += ["ux", "uy", "uz", "vx", "vy", "vz", "wx", "wy", "wz"]
+                if normals is not None:
+                    header += ["nx", "ny", "nz"]
                 header.append("type")
                 if layer_id is not None:
                     header.append("layer")
-                f.write(" ".join(header) + "\n")
+                f.write(sep.join(header) + "\n")
 
             for seg_idx, (seg, seg_type) in enumerate(zip(path_segments, segment_types)):
                 seg = np.asarray(seg, dtype=float)
                 if len(seg) == 0:
                     continue
 
-                if orientations is not None:
-                    # Per point: X axis (3), Y axis (3), Z axis (3), i.e.
-                    # the columns of the rotation matrix, in this order.
-                    R = np.asarray(orientations[seg_idx])
-                    data = np.hstack([seg, R.transpose(0, 2, 1).reshape(len(seg), 9)])
+                if normals is not None:
+                    n = np.asarray(normals[seg_idx], dtype=float).reshape(len(seg), 3)
+                    data = np.hstack([seg, n])
                 else:
                     data = seg
 
-                fmt = " ".join(numeric_fmt) + f" {seg_type}{layer_suffix}"
-                np.savetxt(f, data, fmt=fmt, newline="\n")
+                # np.savetxt cannot append a per-row trailing string, so
+                # the type (+ layer) suffix is appended to each row here.
+                for row in data:
+                    f.write(sep.join(f"{v:.4f}" for v in row) + f"{sep}{seg_type}{layer_col}\n")
 
     def export_printing_path(
         self,
         path_segments: list[np.ndarray],
         segment_types: list[str],
         filepath,
-        include_orientation: bool = False,
-        approach_sign: float = -1.0,
+        include_normal: bool = True,
         simplify_tolerance: float | None = None,
         layer_id=None,
         mode: str = "w",
     ) -> None:
         """
-        Convenience wrapper around export_path_to_txt: optionally
-        simplifies each segment with Ramer-Douglas-Peucker (see
-        simplify_polyline) to shrink the exported file/robot program,
-        then optionally computes this layer's full tool orientation
-        (normal + travel tangent, see compute_path_orientation) - on the
-        simplified points, so the orientation written out always matches
-        the points actually written out.
+        Convenience wrapper around export_path_to_txt / export_path_to_csv
+        (chosen from the file extension: .csv -> comma-separated, anything
+        else -> whitespace-separated): optionally simplifies each segment
+        with Ramer-Douglas-Peucker (see simplify_polyline) to shrink the
+        exported file/robot program, then computes this layer's local
+        surface normals (see compute_path_normals) - on the simplified
+        points, so the normals written out always match the points
+        actually written out. Only the points, their local normal and the
+        segment type are exported: the full tool orientation is
+        reconstructed on the receiving end (e.g. by the RoboDK program)
+        from the trajectory itself.
 
         Note: simplification is applied independently to each segment
         (curve, connection, approach, leave), so it only removes points
@@ -664,17 +571,18 @@ class SlicedObject:
 
         path_segments = self.drop_shared_points(path_segments)
 
-        orientations = (
-            self.compute_path_orientation(path_segments, approach_sign=approach_sign)
-            if include_orientation
-            else None
-        )
+        normals = self.compute_path_normals(path_segments) if include_normal else None
 
-        self.export_path_to_txt(
+        exporter = (
+            self.export_path_to_csv
+            if Path(filepath).suffix.lower() == ".csv"
+            else self.export_path_to_txt
+        )
+        exporter(
             path_segments,
             segment_types,
             filepath,
-            orientations=orientations,
+            normals=normals,
             layer_id=layer_id,
             mode=mode,
         )

@@ -224,7 +224,7 @@ def main() -> None:
         infill_percentage=5.0,
         approach_distance=1.0,
         layer_height=1.0,
-        include_orientation=False,
+        include_normal=True,
         shell_simplify_tolerance=2,    # mm : shells simplifiés (RDP)
         collapse_infill=True,            # infill : 2 extrémités par ligne
         infill_straight_tolerance=0.3,  # mm

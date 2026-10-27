@@ -810,7 +810,6 @@ class SlicerApp(ttk.Frame):
                 approach_distance=float(params["approach_distance"]),
                 max_connection_length=float(params["max_connection_length"]),
                 contour_isovalues=contour_isovalues,
-                include_orientation=True,
                 layer_width=layer_width,
             )
 
