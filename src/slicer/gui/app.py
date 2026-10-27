@@ -27,7 +27,6 @@ except Exception:  # pragma: no cover - pyvista is a hard dependency anyway
 
 
 DEFAULTS = {
-    "fiber_diameter": 0.70,
     "E1": 66550.0,
     "E2": 4900.0,
     "nu12": 0.32,
@@ -92,7 +91,6 @@ class SlicerApp(ttk.Frame):
         # ------------------------------------------------------------------
         v["layer_height"] = DoubleVar(value=0.35)
         v["layer_width"] = DoubleVar(value=0.70)  # nozzle diameter
-        v["fiber_diameter"] = DoubleVar(value=DEFAULTS["fiber_diameter"])
         v["n_layers_under_piece"] = IntVar(value=1)
 
         # ------------------------------------------------------------------
@@ -102,10 +100,12 @@ class SlicerApp(ttk.Frame):
         v["mold_generation"] = BooleanVar(value=False)
 
         # ------------------------------------------------------------------
-        # Piece path parameters
+        # Piece path parameters. The contour is defined by a number of
+        # contour passes: contour_width = n_layers_contour * layer_width,
+        # and the contour isovalues are layer_width * (k + 1/2) for
+        # k = 0 .. n_layers_contour - 1.
         # ------------------------------------------------------------------
-        v["contour_width"] = DoubleVar(value=3.0)
-        v["contour_isovalues"] = StringVar(value="0.5, 1.0, 1.5, 2.0, 2.5")
+        v["n_layers_contour"] = IntVar(value=5)
         v["approach_distance"] = DoubleVar(value=1.0)
         v["max_connection_length"] = DoubleVar(value=2.0)
         v["merge_tolerance"] = DoubleVar(value=0.1)
@@ -115,7 +115,7 @@ class SlicerApp(ttk.Frame):
         # ------------------------------------------------------------------
         v["infill_percentage"] = DoubleVar(value=5.0)
         v["n_contour_shells"] = IntVar(value=2)
-        v["mold_method"] = StringVar(value="vertical")
+        v["mold_method"] = StringVar(value="vertical with occlusion")
 
         # ------------------------------------------------------------------
         # Edge (feature edge) parameters used for the contour computation
@@ -132,6 +132,8 @@ class SlicerApp(ttk.Frame):
         v["vis_path"] = BooleanVar(value=True)
         v["vis_legend"] = BooleanVar(value=True)
         v["vis_mold"] = BooleanVar(value=False)
+        v["vis_mold_layers"] = BooleanVar(value=False)
+        v["vis_mold_layers_range"] = StringVar(value="0")
         v["vis_layers_range"] = StringVar(value="0-4")
 
         # Export options
@@ -283,7 +285,6 @@ class SlicerApp(ttk.Frame):
         rows = [
             ("layer_height", "layer_height [mm] (layer thickness)"),
             ("layer_width", "layer_width [mm] (nozzle diameter)"),
-            ("fiber_diameter", "fiber diameter [mm]"),
             ("n_layers_under_piece", "n_layers_under_piece (layers under the piece)"),
         ]
         for i, (key, label) in enumerate(rows):
@@ -318,7 +319,7 @@ class SlicerApp(ttk.Frame):
             f.columnconfigure(c, weight=1)
 
         rows = [
-            ("contour_width", "contour_width [mm]"),
+            ("n_layers_contour", "n_layers_contour (number of contour passes)"),
             ("approach_distance", "approach_distance [mm]"),
             ("max_connection_length", "max_connection_length [mm]"),
             ("merge_tolerance", "merge_tolerance [mm]"),
@@ -331,12 +332,12 @@ class SlicerApp(ttk.Frame):
                 f, from_=0.0, to=1000.0, increment=0.1, textvariable=v[key], width=10
             ).grid(row=i, column=2, sticky="e", padx=4)
 
-        ttk.Label(f, text="contour_isovalues [mm] (comma-separated)").grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=4, pady=2
-        )
-        ttk.Entry(f, textvariable=v["contour_isovalues"], width=30).grid(
-            row=4, column=2, sticky="e", padx=4
-        )
+        ttk.Label(
+            f,
+            text="The contour width is n_layers_contour × layer_width; the contour "
+                 "isovalues are layer_width × (k + 1/2), k = 0 … n_layers_contour − 1.",
+            wraplength=760,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=2)
 
         f = ttk.LabelFrame(
             tab,
@@ -384,7 +385,7 @@ class SlicerApp(ttk.Frame):
         cb = ttk.Combobox(
             f,
             textvariable=v["mold_method"],
-            values=("vertical", "cone", "simple"),
+            values=("vertical with occlusion", "cone", "simple"),
             state="readonly",
             width=12,
         )
@@ -392,7 +393,7 @@ class SlicerApp(ttk.Frame):
 
         rows = [
             ("infill_percentage", "infill_percentage [%]"),
-            ("n_contour_shells", "n_contour_shells (nombre de contours du moule)"),
+            ("n_contour_shells", "n_contour_shells (number of mold contour passes)"),
         ]
         for i, (key, label) in enumerate(rows):
             ttk.Label(f, text=label).grid(row=i + 1, column=0, sticky="w", padx=4, pady=2)
@@ -422,10 +423,11 @@ class SlicerApp(ttk.Frame):
         f.pack(fill=X, pady=4)
 
         rows = [
-            ("vis_model", "Model (piece layer surfaces)"),
-            ("vis_edges", "Detected edges (extract_feature_edges, contour computation)"),
-            ("vis_path", "Printing path (curves, connections, approach/leave)"),
-            ("vis_mold", "Mold (slicing plane visualization)"),
+            ("vis_model", "Model (piece layer surfaces) — no path computation needed"),
+            ("vis_edges", "Detected edges (extract_feature_edges, contour computation) — no path computation needed"),
+            ("vis_path", "Piece printing path (curves, connections, approach/leave)"),
+            ("vis_mold", "Mold slicing planes — no path computation needed"),
+            ("vis_mold_layers", "Mold printing paths (layers of the mold)"),
             ("vis_legend", "Legend"),
         ]
         for i, (key, label) in enumerate(rows):
@@ -433,12 +435,24 @@ class SlicerApp(ttk.Frame):
                 row=i, column=0, sticky="w", padx=4, pady=2
             )
 
-        ttk.Label(f, text="Layers to visualize (e.g. 0-4 or 2,5,7):").grid(
+        ttk.Label(f, text="Piece layers to visualize (e.g. 0-4 or 2,5,7):").grid(
             row=0, column=1, sticky="w", padx=12, pady=2
         )
         ttk.Entry(f, textvariable=v["vis_layers_range"], width=15).grid(
             row=0, column=2, sticky="w"
         )
+        ttk.Label(f, text="Mold layers to visualize:").grid(
+            row=1, column=1, sticky="w", padx=12, pady=2
+        )
+        ttk.Entry(f, textvariable=v["vis_mold_layers_range"], width=15).grid(
+            row=1, column=2, sticky="w"
+        )
+        ttk.Label(
+            f,
+            text="Warning: visualizing several mold printing layers at once can "
+                 "crash PyVista — keep the selection small.",
+            foreground="red",
+        ).grid(row=2, column=1, columnspan=2, sticky="w", padx=12, pady=2)
 
         ttk.Label(
             f,
@@ -581,7 +595,6 @@ class SlicerApp(ttk.Frame):
 
         layer_height = float(params["layer_height"])
         layer_width = float(params["layer_width"])  # nozzle diameter
-        fiber_diameter = float(params["fiber_diameter"])
 
         rotate_and_lift = bool(params["rotate_and_lift"])
         mold_generation = bool(params["mold_generation"])
@@ -610,7 +623,7 @@ class SlicerApp(ttk.Frame):
             material=composite_material,
             dbc=model.dbc,
             nbc=model.nbc,
-            fiber_diameter=fiber_diameter,
+            fiber_diameter=layer_width,
             layer_height=layer_height,
         )
 
@@ -665,7 +678,7 @@ class SlicerApp(ttk.Frame):
                 shadow_volume = SlicedMold.get_shadow_volume(model, plane_z=0.0)
             elif method == "cone":
                 shadow_volume = SlicedMold.get_shadow_volume_cone(model, plane_z=0.0)
-            else:  # vertical (default)
+            else:  # vertical with occlusion (default)
                 shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
                     model, plane_z=0.0
                 )
@@ -681,42 +694,48 @@ class SlicerApp(ttk.Frame):
             )
 
         # ------------------------------------------------------------------
-        # 5. Piece printing path
+        # 5. Piece printing path (only when needed: visualization of the
+        #    path, or trajectory export)
         # ------------------------------------------------------------------
+        n_layers_contour = int(params["n_layers_contour"])
+        contour_width = n_layers_contour * layer_width
         contour_isovalues = [
-            float(s) for s in str(params["contour_isovalues"]).replace(";", ",").split(",")
-            if s.strip()
+            layer_width * (k + 0.5) for k in range(n_layers_contour)
         ]
 
-        feature_edge_params = {
-            "feature_angle": float(params["feature_angle"]),
-            "boundary_edges": bool(params["boundary_edges"]),
-            "non_manifold_edges": bool(params["non_manifold_edges"]),
-        }
+        vis_path = bool(params["vis_path"])
+        export_piece = bool(params["export_piece"])
 
         piece_paths = []
-        for i, piece in enumerate(pieces):
-            piece.feature_edge_params = feature_edge_params
-            segments, Lcmd, types = piece.build_printing_path(
-                i_surface=i,
-                contour_width=float(params["contour_width"]),
-                approach_distance=float(params["approach_distance"]),
-                max_connection_length=float(params["max_connection_length"]),
-                contour_isovalues=contour_isovalues,
-                merge_tolerance=float(params["merge_tolerance"]),
-            )
-            piece_paths.append((segments, types))
+        if vis_path or export_piece:
+            feature_edge_params = {
+                "feature_angle": float(params["feature_angle"]),
+                "boundary_edges": bool(params["boundary_edges"]),
+                "non_manifold_edges": bool(params["non_manifold_edges"]),
+            }
+
+            for i, piece in enumerate(pieces):
+                piece.feature_edge_params = feature_edge_params
+                segments, Lcmd, types = piece.build_printing_path(
+                    i_surface=i,
+                    contour_width=contour_width,
+                    approach_distance=float(params["approach_distance"]),
+                    max_connection_length=float(params["max_connection_length"]),
+                    contour_isovalues=contour_isovalues,
+                    merge_tolerance=float(params["merge_tolerance"]),
+                )
+                piece_paths.append((segments, types))
 
         # ------------------------------------------------------------------
         # 6. Export
         # ------------------------------------------------------------------
         export_dir = Path(params["export_piece_dir"])
-        if params["export_piece"]:
+        if export_piece:
             export_dir.mkdir(parents=True, exist_ok=True)
             SlicedPiece.export_layers_to_txt(
                 pieces,
                 export_dir / "piece_path.txt",
-                contour_width=float(params["contour_width"]),
+                contour_width=contour_width,
                 approach_distance=float(params["approach_distance"]),
                 max_connection_length=float(params["max_connection_length"]),
                 contour_isovalues=contour_isovalues,
@@ -740,6 +759,8 @@ class SlicerApp(ttk.Frame):
             "mold_layers": mold_layers,
             "shadow_volume": shadow_volume,
             "params": params,
+            "layer_width": layer_width,
+            "layer_height": layer_height,
         }
 
     # ------------------------------------------------------------------
@@ -875,6 +896,31 @@ class SlicerApp(ttk.Frame):
                         color="orange",
                         line_width=2,
                         label="Mold (contours)" if j == 0 else None,
+                    )
+
+        # ------------------------------------------------------------------
+        # Mold printing paths (per layer). Visualizing several layers at
+        # once can crash PyVista, so the selection is meant to stay small.
+        # ------------------------------------------------------------------
+        if params["vis_mold_layers"] and mold_layers:
+            vis_mold_layers = self._parse_layer_selection(
+                str(params["vis_mold_layers_range"]), len(mold_layers)
+            )
+            for j, idx in enumerate(vis_mold_layers):
+                layer = mold_layers[idx]
+                segments, types = layer.build_support_path(
+                    nozzle_diameter=float(params["layer_width"]),
+                    infill_percentage=float(params["infill_percentage"]),
+                    approach_distance=float(params["approach_distance"]),
+                    layer_height=float(params["layer_height"]),
+                )
+                first = j == 0
+                for seg, seg_type in zip(segments, types):
+                    plotter.add_mesh(
+                        pv.lines_from_points(np.asarray(seg), close=False),
+                        color=SEGMENT_COLORS.get(seg_type, "gray"),
+                        line_width=4 if seg_type == "connection" else 2,
+                        label=f"Mold path ({seg_type})" if first else None,
                     )
 
         if params["vis_legend"]:
