@@ -45,6 +45,17 @@ SEGMENT_COLORS = {
     "leave": "orange",
 }
 
+FIBER_COLORS = [
+    "magenta",
+    "purple",
+    "darkcyan",
+    "brown",
+    "darkgreen",
+    "navy",
+    "olive",
+    "deeppink",
+]
+
 
 class SlicerApp(ttk.Frame):
     """Main application frame."""
@@ -140,6 +151,8 @@ class SlicerApp(ttk.Frame):
         v["vis_mold_layers"] = BooleanVar(value=False)
         v["vis_mold_layers_range"] = StringVar(value="0")
         v["vis_layers_range"] = StringVar(value="0-4")
+        v["vis_fibers"] = BooleanVar(value=False)
+        v["vis_fibers_range"] = StringVar(value="1")
 
         # Export options
         v["export_piece"] = BooleanVar(value=True)
@@ -472,6 +485,7 @@ class SlicerApp(ttk.Frame):
             ("vis_path", "Piece printing path (curves, connections, approach/leave)"),
             ("vis_mold", "Mold slicing planes — no path computation needed"),
             ("vis_mold_layers", "Mold printing paths (layers of the mold)"),
+            ("vis_fibers", "Fibers (transformed, one color per layer)"),
             ("vis_legend", "Legend"),
         ]
         for i, (key, label) in enumerate(rows):
@@ -507,6 +521,21 @@ class SlicerApp(ttk.Frame):
                  "crash PyVista — keep the selection small.",
             foreground="red",
         ).grid(row=2, column=1, columnspan=2, sticky="w", padx=12, pady=2)
+
+        # Fiber layers to visualize (from the fiber directories)
+        ttk.Label(f, text="Fiber layers to visualize:").grid(
+            row=3, column=1, sticky="w", padx=12, pady=2
+        )
+        self.entry_fiber_layers = ttk.Entry(f, textvariable=v["vis_fibers_range"], width=15)
+        self.entry_fiber_layers.grid(row=3, column=2, sticky="w")
+        self.lbl_fiber_layers = ttk.Label(f, text="Fibers:")
+
+        def _on_vis_fibers_toggle(*_):
+            state = "normal" if v["vis_fibers"].get() else "disabled"
+            self.entry_fiber_layers.configure(state=state)
+
+        v["vis_fibers"].trace_add("write", _on_vis_fibers_toggle)
+        _on_vis_fibers_toggle()
 
         ttk.Label(
             f,
@@ -833,12 +862,45 @@ class SlicerApp(ttk.Frame):
                 layer_height=layer_height,
             )
 
+        # ------------------------------------------------------------------
+        # 7. Fiber layers (transformed: same frame as the model), for the
+        #    optional visualization. Read from the transformed directory
+        #    when it exists (mold generation), else from the raw fiber
+        #    directory after applying the same transform as the model.
+        # ------------------------------------------------------------------
+        fiber_layers = None
+        if params["vis_fibers"]:
+            fiber_layers = {}
+            if mold_generation:
+                fiber_root = transformed_dir
+            else:
+                fiber_root = fiber_dir
+
+            layer_dirs = sorted(
+                (d for d in fiber_root.glob("layer_*") if d.is_dir()),
+                key=lambda d: int(d.name.split("_")[-1]),
+            )
+            for layer_dir in layer_dirs:
+                layer = int(layer_dir.name.split("_")[-1])
+                if mold_generation:
+                    # Already transformed (saved in the transformed dir)
+                    fiber_layers[layer] = SlicedPiece.load_fiber_paths(
+                        fiber_root, layer=layer
+                    )
+                else:
+                    raw = SlicedPiece.load_fiber_paths(fiber_root, layer=layer)
+                    fiber_layers[layer] = {
+                        k: SlicerApp._transform_points(p, R, lift_offset)
+                        for k, p in raw.items()
+                    }
+
         return {
             "model": model,
             "pieces": pieces,
             "piece_paths": piece_paths,
             "mold_layers": mold_layers,
             "shadow_volume": shadow_volume,
+            "fiber_layers": fiber_layers,
             "params": params,
             "layer_width": layer_width,
             "layer_height": layer_height,
@@ -892,6 +954,7 @@ class SlicerApp(ttk.Frame):
         piece_paths = result["piece_paths"]
         mold_layers = result["mold_layers"]
         shadow_volume = result["shadow_volume"]
+        fiber_layers = result.get("fiber_layers")
 
         vis_layers = self._parse_layer_selection(
             str(params["vis_layers_range"]), len(pieces)
@@ -1003,6 +1066,30 @@ class SlicerApp(ttk.Frame):
                         line_width=4 if seg_type == "connection" else 2,
                         label=f"Mold path ({seg_type})" if first else None,
                     )
+
+        # ------------------------------------------------------------------
+        # Fibers (transformed, one color per layer)
+        # ------------------------------------------------------------------
+        if params["vis_fibers"] and fiber_layers:
+            vis_fiber_layers = self._parse_layer_selection(
+                str(params["vis_fibers_range"]),
+                max(fiber_layers) + 1 if fiber_layers else 0,
+            )
+            first = True
+            for i, layer in enumerate(sorted(fiber_layers)):
+                if layer not in vis_fiber_layers:
+                    continue
+                color = FIBER_COLORS[i % len(FIBER_COLORS)]
+                for fiber_path in fiber_layers[layer].values():
+                    plotter.add_mesh(
+                        pv.lines_from_points(
+                            np.asarray(fiber_path), close=False
+                        ),
+                        color=color,
+                        line_width=2,
+                        label=f"Fibers layer {layer}" if first else None,
+                    )
+                first = False
 
         if params["vis_legend"]:
             plotter.add_legend()
