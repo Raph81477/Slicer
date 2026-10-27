@@ -48,6 +48,12 @@ APPROACH_DISTANCE = 1.0                       # approach/leave length [mm]
 MAX_CONNECTION_LENGTH = 2.0                  # above this: leave + approach [mm]
 SIMPLIFY_TOLERANCE = 0.5                     # RDP downsampling tolerance [mm] (0 disables)
 
+# --- Edge detection (surface boundary used for the contours) ----------
+FEATURE_ANGLE = 30.0                          # angle between adjacent faces [deg]
+BOUNDARY_EDGES = True                         # include open borders
+NON_MANIFOLD_EDGES = True                     # include non-manifold edges
+VIS_EDGES = False                             # show the detected edges (no path computation)
+
 # --- Mold -------------------------------------------------------------
 GENERATE_MOLD = True                         # build the shadow volume + slicing planes
 INFILL_PERCENTAGE = 5.0                      # mold infill [%]
@@ -161,14 +167,9 @@ def transform_fiber_paths(
     return transformed
 
 
-def slice_piece(model: CompositeModel, rot_mat: np.ndarray, lift_offset: float):
-    """Slice the piece and build + downsample every layer's printing path,
-    exactly as the GUI pipeline does. Returns (pieces, piece_paths)."""
-    fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
-    fiber_paths = transform_fiber_paths(fiber_paths, rot_mat, lift_offset)
-
-    pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
-
+def slice_piece_paths(pieces: list[SlicedPiece]):
+    """Build + downsample every layer's printing path, exactly as the GUI
+    pipeline does. Returns piece_paths: one (segments, types) per layer."""
     contour_isovalues = [
         LAYER_WIDTH * (k + 0.5) for k in range(N_LAYERS_CONTOUR)
     ]
@@ -197,7 +198,7 @@ def slice_piece(model: CompositeModel, rot_mat: np.ndarray, lift_offset: float):
         )
         piece_paths.append((segments, types))
 
-    return pieces, piece_paths
+    return piece_paths
 
 
 def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
@@ -241,6 +242,32 @@ def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
         )
 
     return shadow_volume
+
+
+def add_edges(
+    plotter: pv.Plotter,
+    pieces: list[SlicedPiece],
+    n_layers: int,
+) -> None:
+    """Feature edges of the layer surfaces, as used for the contour
+    computation. Purely geometric: no printing path is built, so this can
+    be checked on its own before running the full path pipeline."""
+    n_layers = min(n_layers, len(pieces))
+
+    for i in range(n_layers):
+        edges = pieces[i].surface.extract_feature_edges(
+            feature_angle=FEATURE_ANGLE,
+            boundary_edges=BOUNDARY_EDGES,
+            non_manifold_edges=NON_MANIFOLD_EDGES,
+        )
+        if edges.n_points == 0:
+            continue
+        plotter.add_mesh(
+            edges,
+            color="black",
+            line_width=3,
+            label="Detected edges" if i == 0 else None,
+        )
 
 
 def add_printing_layers(
@@ -404,8 +431,17 @@ def main() -> None:
     # 1. Model (rotation + lift, same convention as the GUI)
     model, rot_mat, lift_offset = build_model()
 
-    # 2. Piece: slice + build + downsample the paths (shared by plot/export)
-    pieces, piece_paths = slice_piece(model, rot_mat, lift_offset)
+    # 2. Piece: slice (needed for the edges and the layer surfaces), then
+    #    build + downsample the paths only when required.
+    fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
+    fiber_paths = transform_fiber_paths(fiber_paths, rot_mat, lift_offset)
+    pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
+
+    need_paths = (
+        (VIS_LAYERS > 0)
+        or EXPORT_PLASTIC
+    )
+    piece_paths = slice_piece_paths(pieces) if need_paths else []
 
     # 3. Mold shadow volume (needed for the planes and the mold export)
     shadow_volume = None
@@ -453,6 +489,9 @@ def main() -> None:
                 patch, color="red", opacity=0.35, show_edges=False,
                 label="Planes normal to Y",
             )
+
+    if VIS_EDGES:
+        add_edges(plotter, pieces, n_layers=max(VIS_LAYERS, 1))
 
     if VIS_LAYERS > 0:
         add_printing_layers(plotter, pieces, piece_paths, n_layers=VIS_LAYERS)
