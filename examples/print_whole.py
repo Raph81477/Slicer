@@ -62,9 +62,14 @@ OFFSET_FACES = 0.05                          # ray origin offset [mm]
 
 # --- Visualization ----------------------------------------------------
 VIS_MOLD = GENERATE_MOLD                     # show the mold planes
-VIS_LAYERS = 2                               # number of piece layers to display
+VIS_LAYERS = None                            # piece layers to display (None = all, int = first N,
+                                             # list = explicit indices e.g. [0, 2, 5])
 VIS_LAYER_HEIGHT = 0.35                      # exaggerated spacing between plotted layers
 VIS_FIBERS = True                            # show the fiber paths
+VIS_MOLD_LAYERS = None                       # mold printing layers to display (None = none,
+                                             # int = first N, list = explicit indices)
+
+# ======================================================================
 
 # --- Export ------------------------------------------------------------
 EXPORT_FIBERS = True                         # save the transformed fibers to CSV
@@ -244,17 +249,28 @@ def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
     return shadow_volume
 
 
+def resolve_layer_selection(selection, n_total: int, name: str) -> list[int]:
+    """Resolve a layer selection into an explicit list of indices.
+
+    - int: the first N layers
+    - list/tuple/set of ints: exactly those indices (clipped to range)
+    """
+    if isinstance(selection, int):
+        return list(range(min(selection, n_total)))
+    if isinstance(selection, (list, tuple, set)):
+        return sorted(i for i in selection if 0 <= i < n_total)
+    raise TypeError(f"Invalid {name} layer selection: {selection!r}")
+
+
 def add_edges(
     plotter: pv.Plotter,
     pieces: list[SlicedPiece],
-    n_layers: int,
+    layer_indices: list[int],
 ) -> None:
     """Feature edges of the layer surfaces, as used for the contour
     computation. Purely geometric: no printing path is built, so this can
     be checked on its own before running the full path pipeline."""
-    n_layers = min(n_layers, len(pieces))
-
-    for i in range(n_layers):
+    for i in layer_indices:
         edges = pieces[i].surface.extract_feature_edges(
             feature_angle=FEATURE_ANGLE,
             boundary_edges=BOUNDARY_EDGES,
@@ -266,7 +282,7 @@ def add_edges(
             edges,
             color="black",
             line_width=3,
-            label="Detected edges" if i == 0 else None,
+            label="Detected edges" if i == layer_indices[0] else None,
         )
 
 
@@ -274,15 +290,15 @@ def add_printing_layers(
     plotter: pv.Plotter,
     pieces: list[SlicedPiece],
     piece_paths: list[tuple[list, list]],
-    n_layers: int,
+    layer_indices: list[int],
 ) -> None:
-    """Part layer surfaces and their (already downsampled) printing paths."""
-    n_layers = min(n_layers, len(pieces))
-    print(f"Total number of layers: {len(pieces)} (plotting {n_layers})")
+    """Part layer surfaces and their (already downsampled) printing paths,
+    for the selected layers only."""
+    print(f"Total number of layers: {len(pieces)} (plotting {layer_indices})")
 
     normal = pieces[0].normal
 
-    for i in range(n_layers):
+    for i in layer_indices:
         piece = pieces[i]
         segments, types = piece_paths[i]
 
@@ -437,8 +453,36 @@ def main() -> None:
     fiber_paths = transform_fiber_paths(fiber_paths, rot_mat, lift_offset)
     pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
 
+    # Layer selections (piece + mold), resolved once
+    piece_layer_indices = (
+        resolve_layer_selection(VIS_LAYERS, len(pieces), "piece")
+        if VIS_LAYERS is not None else []
+    )
+
+    mold_layers = []
+    if GENERATE_MOLD and VIS_MOLD_LAYERS is not None:
+        part_surface = SlicedMold._outer_surface(model)
+        shadow_volume_for_layers, _, _ = SlicedMold.get_shadow_volume_vertical(
+            model,
+            plane_z=PLANE_Z,
+            offset_faces=OFFSET_FACES,
+        )
+        mold_layers = SlicedMold.slice_shadow_volume(
+            shadow_volume=shadow_volume_for_layers,
+            part_surface=part_surface,
+            layer_height=LAYER_HEIGHT,
+            nozzle_diameter=LAYER_WIDTH,
+            infill_percentage=INFILL_PERCENTAGE,
+            plane_z=PLANE_Z,
+        )
+        mold_layer_indices = resolve_layer_selection(
+            VIS_MOLD_LAYERS, len(mold_layers), "mold"
+        )
+    else:
+        mold_layer_indices = []
+
     need_paths = (
-        (VIS_LAYERS > 0)
+        bool(piece_layer_indices)
         or EXPORT_PLASTIC
     )
     piece_paths = slice_piece_paths(pieces) if need_paths else []
@@ -491,10 +535,31 @@ def main() -> None:
             )
 
     if VIS_EDGES:
-        add_edges(plotter, pieces, n_layers=max(VIS_LAYERS, 1))
+        edge_indices = piece_layer_indices or list(range(len(pieces)))[:1]
+        add_edges(plotter, pieces, edge_indices)
 
-    if VIS_LAYERS > 0:
-        add_printing_layers(plotter, pieces, piece_paths, n_layers=VIS_LAYERS)
+    if piece_layer_indices:
+        add_printing_layers(plotter, pieces, piece_paths, piece_layer_indices)
+
+    # Selected mold printing layers. Visualizing several at once can
+    # crash PyVista, keep the selection small.
+    if mold_layer_indices:
+        for j in mold_layer_indices:
+            layer = mold_layers[j]
+            segments, types = layer.build_support_path(
+                nozzle_diameter=LAYER_WIDTH,
+                infill_percentage=INFILL_PERCENTAGE,
+                approach_distance=APPROACH_DISTANCE,
+                layer_height=LAYER_HEIGHT,
+            )
+            first = j == mold_layer_indices[0]
+            for seg, seg_type in zip(segments, types):
+                plotter.add_mesh(
+                    pv.lines_from_points(seg, close=False),
+                    color=PATH_COLORS[seg_type],
+                    line_width=4 if seg_type == "connection" else 2,
+                    label=f"Mold path (layer q={layer.q})" if first else None,
+                )
 
     if VIS_FIBERS:
         fiber_layers = load_transformed_fiber_layers(rot_mat, lift_offset)

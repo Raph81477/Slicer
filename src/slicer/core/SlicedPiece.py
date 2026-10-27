@@ -365,7 +365,11 @@ class SlicedPiece(SlicedObject):
         grid = model.get_grid(u_scaling_factor=0)
         grid.point_data["q"] = model.q
 
-        q_values = np.arange(1.0, int(max_q_value))  # Layers 1 to N
+        # Layers 1 to N: every integer level BELOW max_q exists as a full
+        # layer, so the last integer (floor(max_q)) must be INCLUDED —
+        # arange(1, int(max_q)) would drop it (e.g. max_q = 8.89 has layers
+        # 1..8, not 1..7).
+        q_values = np.arange(1.0, int(np.floor(max_q_value)) + 1)
         return grid, q_values
 
     @staticmethod
