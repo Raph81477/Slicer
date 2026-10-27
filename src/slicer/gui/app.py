@@ -229,7 +229,7 @@ class SlicerApp(ttk.Frame):
         f = ttk.LabelFrame(tab, text="Fibers (CSV files exported by OAMC)")
         f.pack(fill=X, pady=4)
         f.columnconfigure(1, weight=1)
-        ttk.Label(f, text="Fiber directory (contains fibers/layer_*):").grid(
+        ttk.Label(f, text="Fiber directory (contains layer_*):").grid(
             row=0, column=0, sticky="w", padx=4, pady=2
         )
         ttk.Entry(f, textvariable=v["fiber_dir"]).grid(row=0, column=1, sticky="ew", padx=4)
@@ -322,7 +322,6 @@ class SlicerApp(ttk.Frame):
             ("n_layers_contour", "n_layers_contour (number of contour passes)"),
             ("approach_distance", "approach_distance [mm]"),
             ("max_connection_length", "max_connection_length [mm]"),
-            ("merge_tolerance", "merge_tolerance [mm]"),
         ]
         for i, (key, label) in enumerate(rows):
             ttk.Label(f, text=label).grid(
@@ -348,12 +347,17 @@ class SlicerApp(ttk.Frame):
         for c in range(4):
             f.columnconfigure(c, weight=1)
 
-        ttk.Label(f, text="feature_angle [°] (angle between adjacent faces)").grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2
-        )
-        ttk.Spinbox(
-            f, from_=0.0, to=180.0, increment=1.0, textvariable=v["feature_angle"], width=10
-        ).grid(row=0, column=2, sticky="e", padx=4)
+        rows = [
+            ("feature_angle", "feature_angle [°] (angle between adjacent faces)"),
+            ("merge_tolerance", "merge_tolerance [mm] (coincident point merging)"),
+        ]
+        for i, (key, label) in enumerate(rows):
+            ttk.Label(f, text=label).grid(
+                row=i, column=0, columnspan=2, sticky="w", padx=4, pady=2
+            )
+            ttk.Spinbox(
+                f, from_=0.0, to=180.0, increment=0.05, textvariable=v[key], width=10
+            ).grid(row=i, column=2, sticky="e", padx=4)
         ttk.Checkbutton(
             f, text="boundary_edges (open borders)", variable=v["boundary_edges"]
         ).grid(row=1, column=0, sticky="w", padx=4)
@@ -435,18 +439,28 @@ class SlicerApp(ttk.Frame):
                 row=i, column=0, sticky="w", padx=4, pady=2
             )
 
+        # The mold layer selection is only relevant when the mold printing
+        # paths are actually visualized: keep it disabled otherwise.
+        def _on_mold_layers_toggle(*_):
+            state = "normal" if v["vis_mold_layers"].get() else "disabled"
+            self.entry_mold_layers.configure(state=state)
+            self.lbl_mold_layers.configure(foreground="black" if state == "normal" else "gray")
+
+        v["vis_mold_layers"].trace_add("write", _on_mold_layers_toggle)
+
         ttk.Label(f, text="Piece layers to visualize (e.g. 0-4 or 2,5,7):").grid(
             row=0, column=1, sticky="w", padx=12, pady=2
         )
         ttk.Entry(f, textvariable=v["vis_layers_range"], width=15).grid(
             row=0, column=2, sticky="w"
         )
-        ttk.Label(f, text="Mold layers to visualize:").grid(
-            row=1, column=1, sticky="w", padx=12, pady=2
+        self.lbl_mold_layers = ttk.Label(f, text="Mold layers to visualize:")
+        self.lbl_mold_layers.grid(row=1, column=1, sticky="w", padx=12, pady=2)
+        self.entry_mold_layers = ttk.Entry(
+            f, textvariable=v["vis_mold_layers_range"], width=15
         )
-        ttk.Entry(f, textvariable=v["vis_mold_layers_range"], width=15).grid(
-            row=1, column=2, sticky="w"
-        )
+        self.entry_mold_layers.grid(row=1, column=2, sticky="w")
+        _on_mold_layers_toggle()
         ttk.Label(
             f,
             text="Warning: visualizing several mold printing layers at once can "

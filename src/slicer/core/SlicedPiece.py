@@ -41,12 +41,18 @@ class SlicedPiece(SlicedObject):
     @staticmethod
     def load_fiber_paths(directory: Path, layer: int = 1) -> dict[int, np.ndarray]:
         """
-        Load the fiber paths of a given layer from the
-        "fibers/layer_<layer>" CSV files.
+        Load the fiber paths of a given layer from the "layer_<layer>"
+        CSV files. `directory` is the folder that directly holds the
+        layer_<layer> subdirectories; for backward compatibility, a
+        directory that instead holds a single "fibers" subfolder is
+        accepted too.
 
         TODO: currently only extracts a single layer at a time.
         """
-        layer_dir = Path(directory) / f"fibers/layer_{layer}"
+        directory = Path(directory)
+        layer_dir = directory / f"layer_{layer}"
+        if not layer_dir.is_dir() and (directory / "fibers").is_dir():
+            layer_dir = directory / "fibers" / f"layer_{layer}"
 
         fiber_paths = {}
 
