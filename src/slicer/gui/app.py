@@ -172,6 +172,11 @@ class SlicerApp(ttk.Frame):
         nb.add(self.tab_viz, text="Visualization")
         nb.add(self.tab_material, text="Materials")
 
+        # OAMC fiber path tuning, in a dedicated page
+        from slicer.gui.fibers import FiberTuningTab
+        self.tab_fibers = FiberTuningTab(nb, self)
+        nb.add(self.tab_fibers, text="Fiber tuning")
+
         self._build_files_tab()
         self._build_params_tab()
         self._build_mold_tab()

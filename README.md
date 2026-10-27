@@ -57,3 +57,9 @@ Fonctionnalités :
   modifiables.
 - Export des trajectoires (pièce + moule) vers des fichiers texte
   prêts pour RoboDK.
+
+- Onglet « Fiber tuning » : pipeline OAMC complet de génération/optimisation
+  des fibres (charge de palier, mold optionnel, optimisation aux moindres
+  carrés avec itérations, load paths LPP, post-traitement RDP/outliers,
+  export des fibres et CSV de convergence), réutilisé du tuner OAMC
+  autonome, dans une page dédiée du slicer.
