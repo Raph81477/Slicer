@@ -386,6 +386,60 @@ class SlicedObject:
 
         return np.split(all_normals, np.cumsum(lengths)[:-1])
 
+    def analyze_and_downsample_path(
+        self,
+        path_segments: list[np.ndarray],
+        segment_types: list[str],
+        tolerance: float | None = None,
+        min_segment_length: float | None = None,
+    ) -> tuple[list[np.ndarray], list[str]]:
+        """
+        Analyze a printing path and downsample it where possible, BEFORE
+        any export or visualization, so that both see the exact same
+        geometry.
+
+        - tolerance: Ramer-Douglas-Peucker tolerance in mm (see
+          simplify_polyline). None disables the downsampling entirely.
+        - min_segment_length: when given, a segment whose two endpoints
+          are closer than this is left untouched (RDP on a very short
+          stroke can destroy its shape without any meaningful point
+          count reduction).
+
+        Approach/leave moves (2 points) and degenerate segments are kept
+        as-is; every other segment is RDP-simplified. Segments that
+        become empty are dropped, and (segment, type) stay in sync.
+        """
+        if tolerance is None:
+            return path_segments, segment_types
+
+        out_segments = []
+        out_types = []
+
+        for seg, seg_type in zip(path_segments, segment_types):
+            seg = np.asarray(seg, dtype=float)
+
+            if len(seg) < 3:
+                # Approach/leave moves and degenerate bits: nothing to
+                # downsample, keep the segment as it is.
+                if len(seg) > 0:
+                    out_segments.append(seg)
+                    out_types.append(seg_type)
+                continue
+
+            if (
+                min_segment_length is not None
+                and np.linalg.norm(seg[-1] - seg[0]) < min_segment_length
+            ):
+                out_segments.append(seg)
+                out_types.append(seg_type)
+                continue
+
+            simplified = self.simplify_polyline(seg, tolerance)
+            out_segments.append(simplified)
+            out_types.append(seg_type)
+
+        return out_segments, out_types
+
     @staticmethod
     def simplify_polyline(points: np.ndarray, tolerance: float) -> np.ndarray:
         """

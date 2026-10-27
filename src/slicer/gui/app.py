@@ -111,6 +111,9 @@ class SlicerApp(ttk.Frame):
         v["approach_distance"] = DoubleVar(value=1.0)
         v["max_connection_length"] = DoubleVar(value=2.0)
         v["merge_tolerance"] = DoubleVar(value=0.1)
+        # RDP downsampling of the piece path, applied once before the
+        # export AND the visualization so both see the same curves.
+        v["simplify_tolerance"] = DoubleVar(value=0.5)
 
         # ------------------------------------------------------------------
         # Mold parameters
@@ -330,6 +333,7 @@ class SlicerApp(ttk.Frame):
             ("n_layers_contour", "n_layers_contour (number of contour passes)"),
             ("approach_distance", "approach_distance [mm]"),
             ("max_connection_length", "max_connection_length [mm]"),
+            ("simplify_tolerance", "simplify_tolerance [mm] (RDP downsampling of the piece path)"),
         ]
         for i, (key, label) in enumerate(rows):
             ttk.Label(f, text=label).grid(
@@ -795,6 +799,15 @@ class SlicerApp(ttk.Frame):
                     merge_tolerance=float(params["merge_tolerance"]),
                     layer_width=layer_width,
                 )
+
+                # Downsample once, here: the export and the visualization
+                # both reuse these already-simplified curves.
+                segments, types = piece.analyze_and_downsample_path(
+                    segments,
+                    types,
+                    tolerance=float(params["simplify_tolerance"]),
+                    min_segment_length=2.0 * layer_width,
+                )
                 piece_paths.append((segments, types))
 
         # ------------------------------------------------------------------
@@ -806,11 +819,8 @@ class SlicerApp(ttk.Frame):
             SlicedPiece.export_layers_to_txt(
                 pieces,
                 export_dir / "piece_path.txt",
-                contour_width=contour_width,
-                approach_distance=float(params["approach_distance"]),
-                max_connection_length=float(params["max_connection_length"]),
-                contour_isovalues=contour_isovalues,
-                layer_width=layer_width,
+                piece_paths=piece_paths,
+                include_normal=True,
             )
 
         if mold_generation and mold_layers and params["export_mold"]:

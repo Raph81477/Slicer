@@ -529,40 +529,52 @@ class SlicedPiece(SlicedObject):
         cls,
         pieces: list["SlicedPiece"],
         filepath,
+        piece_paths: list[tuple[list[np.ndarray], list[str]]] | None = None,
         contour_width: float = 3.0,
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
-        include_normal: bool = True,
-        simplify_tolerance: float | None = None,
         layer_width: float = 0.70,
+        include_normal: bool = True,
+        **build_kwargs,
     ) -> None:
         """
-        Build the full printing path for every given piece layer and
-        write the whole trajectory (all layers, in order) to a single
-        text file, ready to be loaded by an external trajectory simulator
-        such as RoboDK. Columns: x y z nx ny nz type layer — the full
-        tool orientation is rebuilt on the receiving end from the points
-        and the normals, exactly like the CSV export.
+        Write the piece printing trajectory (all layers, in order) to a
+        single text file, ready to be loaded by an external trajectory
+        simulator such as RoboDK. Columns: x y z nx ny nz type layer —
+        the full tool orientation is rebuilt on the receiving end from
+        the points and the normals, exactly like the CSV export.
 
-        layer_width sets the infill slicing plane spacing (one bead width),
-        so infill and contour lines are evenly spaced.
+        piece_paths: when given, the already-built (and usually already
+        downsampled, see SlicedObject.analyze_and_downsample_path)
+        (segments, types) of each layer, in layer order — no path is
+        rebuilt and no simplification is applied here. When omitted, the
+        paths are rebuilt from the pieces with build_printing_path (using
+        contour_width / approach_distance / max_connection_length /
+        contour_isovalues / layer_width), at FULL resolution: downsample
+        first with analyze_and_downsample_path if needed.
 
-        simplify_tolerance: when given, each segment is simplified with
-        Ramer-Douglas-Peucker (see SlicedObject.simplify_polyline) before
-        being written out, to shrink the exported file/robot program.
+        No Ramer-Douglas-Peucker downsampling happens in this export:
+        downsample beforehand so that what is written is exactly what
+        has been visualized.
         """
         filepath = Path(filepath)
 
         for i, piece in enumerate(pieces):
-            segments, _, types = piece.build_printing_path(
-                i_surface=i,
-                contour_width=contour_width,
-                approach_distance=approach_distance,
-                max_connection_length=max_connection_length,
-                contour_isovalues=contour_isovalues,
-                layer_width=layer_width,
-            )
+            if piece_paths is not None:
+                segments, types = piece_paths[i]
+                simplify_tolerance = None
+            else:
+                segments, _, types = piece.build_printing_path(
+                    i_surface=i,
+                    contour_width=contour_width,
+                    approach_distance=approach_distance,
+                    max_connection_length=max_connection_length,
+                    contour_isovalues=contour_isovalues,
+                    layer_width=layer_width,
+                    **build_kwargs,
+                )
+                simplify_tolerance = None
 
             piece.export_printing_path(
                 segments,
@@ -581,13 +593,14 @@ class SlicedPiece(SlicedObject):
         cls,
         pieces: list["SlicedPiece"],
         directory,
+        piece_paths: list[tuple[list[np.ndarray], list[str]]] | None = None,
         contour_width: float = 3.0,
         approach_distance: float = 1.0,
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
-        include_normal: bool = True,
-        simplify_tolerance: float | None = None,
         layer_width: float = 0.70,
+        include_normal: bool = True,
+        **build_kwargs,
     ) -> None:
         """
         Export the plastic printing paths of every layer, one directory
@@ -595,6 +608,13 @@ class SlicedPiece(SlicedObject):
         layout saved by oamc's save_fibers (fibers/layer_i/fiber_i_j.csv).
 
         layer_width sets the infill slicing plane spacing (one bead width).
+
+        piece_paths: when given, the already-built (and usually already
+        downsampled, see SlicedObject.analyze_and_downsample_path)
+        (segments, types) of each layer, in layer order — no path is
+        rebuilt and no simplification is applied here. When omitted, the
+        paths are rebuilt from the pieces with build_printing_path at FULL
+        resolution.
 
         Each CSV file holds one continuous path segment (curve, approach,
         leave or connection) with the columns
@@ -604,24 +624,25 @@ class SlicedPiece(SlicedObject):
         where (nx, ny, nz) is the local surface normal at that point and
         `type` is the segment type. No tool axes are exported: the full
         orientation is rebuilt on the receiving end (e.g. by the RoboDK
-        program), exactly like the txt export.
+        program), exactly like the txt export. No downsampling happens
+        here: downsample beforehand (analyze_and_downsample_path) so what
+        is written is exactly what has been visualized.
         """
         directory = Path(directory)
 
         for i, piece in enumerate(pieces):
-            segments, _, types = piece.build_printing_path(
-                i_surface=i,
-                contour_width=contour_width,
-                approach_distance=approach_distance,
-                max_connection_length=max_connection_length,
-                contour_isovalues=contour_isovalues,
-                layer_width=layer_width,
-            )
-
-            if simplify_tolerance is not None:
-                segments = [
-                    piece.simplify_polyline(seg, simplify_tolerance) for seg in segments
-                ]
+            if piece_paths is not None:
+                segments, types = piece_paths[i]
+            else:
+                segments, _, types = piece.build_printing_path(
+                    i_surface=i,
+                    contour_width=contour_width,
+                    approach_distance=approach_distance,
+                    max_connection_length=max_connection_length,
+                    contour_isovalues=contour_isovalues,
+                    layer_width=layer_width,
+                    **build_kwargs,
+                )
 
             segments = piece.drop_shared_points(segments)
 

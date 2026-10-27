@@ -118,6 +118,12 @@ def main() -> None:
             max_connection_length=4 * 0.5,
         )
 
+        # Downsample right after building the path: the plot below and
+        # the export at the end both reuse these simplified curves.
+        path_segments, segment_types = piece.analyze_and_downsample_path(
+            path_segments, segment_types, tolerance=0.5
+        )
+
         print(f"Layer {i}: full path = {len(path_segments)} segments, {len(Lcmd)} commands")
 
         for seg, seg_type in zip(path_segments, segment_types):
@@ -127,16 +133,12 @@ def main() -> None:
                 line_width=4 if seg_type == "connection" else 2,
             )
 
-        # Export the printing path of every layer to a single text file, ready
-    # to be loaded by an external trajectory simulator such as RoboDK.
+    # Export exactly what was plotted: the export applies no
+    # downsampling of its own anymore.
     SlicedPiece.export_layers_to_txt(
         pieces[0:1],
         DIR / "trajectories" / "piece_path.txt",
-        contour_width=3.0,
-        approach_distance=1.0,
-        max_connection_length=4 * 0.5,
-        include_normal=True,
-        simplify_tolerance=0.5, #mm
+        piece_paths=[(path_segments, segment_types)],
     )
     plotter.show()
 
