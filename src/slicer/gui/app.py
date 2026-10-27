@@ -665,6 +665,18 @@ class SlicerApp(ttk.Frame):
         fiber_paths = SlicedPiece.load_fiber_paths(fiber_source_dir, layer=1)
         pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
 
+        # Merge coincident points of every layer surface right after the
+        # isosurface extraction, so that every downstream operation (edge
+        # detection, dist_to_boundary, contour extraction, path building,
+        # visualization) sees the same merged geometry. build_printing_path
+        # re-merges internally (harmless no-op after this point), but
+        # previously nothing was merged when the path computation was
+        # skipped, which left duplicated boundary points and broke edge
+        # detection.
+        merge_tolerance = float(params["merge_tolerance"])
+        for piece in pieces:
+            piece.surface = piece.surface.merge_points(tolerance=merge_tolerance)
+
         # ------------------------------------------------------------------
         # 4. Mold generation
         # ------------------------------------------------------------------
