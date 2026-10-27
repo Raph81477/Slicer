@@ -23,6 +23,13 @@ class SlicedPiece(SlicedObject):
     def __init__(self, surface: pv.PolyData, fiber_paths: dict[int, np.ndarray] | None = None):
         super().__init__(surface)
         self.fiber_paths = fiber_paths or {}
+        # Infill orientation: angle of the infill lines relative to the
+        # mean direction (0, 45 or 90 degrees), and how that mean direction
+        # is obtained: from the fiber paths ("fibers", default) or from the
+        # part dimensions (longest in-plane axis of the layer surface,
+        # "dimensions").
+        self.infill_angle_deg: float = 45.0
+        self.mean_direction_mode: str = "fibers"
 
     # ------------------------------------------------------------------
     # Fiber data
@@ -145,19 +152,59 @@ class SlicedPiece(SlicedObject):
     # Slicing planes
     # ------------------------------------------------------------------
 
+    def direction_from_dimensions(self) -> np.ndarray:
+        """
+        Mean direction estimated from the part dimensions: the principal
+        in-plane axis of this layer's surface (first principal component of
+        the surface points projected onto the layer plane), i.e. the
+        direction along which the piece is the longest.
+        """
+        n = self.normal
+        pts = self.surface.points
+
+        # Project the points onto the layer plane
+        pts_plane = pts - np.outer(pts @ n, n)
+        centered = pts_plane - pts_plane.mean(axis=0)
+
+        _, eigvecs = np.linalg.eigh(centered.T @ centered)
+        principal = eigvecs[:, -1]
+
+        # Re-orthogonalize against n (numerical safety) and normalize
+        principal = principal - (principal @ n) * n
+        principal /= np.linalg.norm(principal)
+
+        # Deterministic sign: largest-magnitude component positive
+        if principal[np.argmax(np.abs(principal))] < 0:
+            principal = -principal
+
+        return principal
+
+    @property
+    def infill_mean_direction(self) -> np.ndarray:
+        """
+        Mean direction used to orient the infill, depending on
+        mean_direction_mode: "fibers" (fiber_mean_direction) or
+        "dimensions" (direction_from_dimensions).
+        """
+        if self.mean_direction_mode == "dimensions":
+            return self.direction_from_dimensions()
+        return self.fiber_mean_direction
+
     def generate_slicing_planes(self, i_surface: int = 0, spacing: float = 0.5):
         """
         Generate the infill slicing planes for this layer, alternating the
-        45-degree offset direction (relative to the mean fiber direction)
-        every other layer. `spacing` is the distance between two planes.
+        offset direction every other layer (relative to the mean direction
+        given by infill_mean_direction, at infill_angle_deg degrees).
+        `spacing` is the distance between two planes.
         """
-        mean_dir = self.fiber_mean_direction
+        mean_dir = self.infill_mean_direction
         n = self.normal
 
         sign = 1.0 if i_surface % 2 == 0 else -1.0
+        angle = np.deg2rad(self.infill_angle_deg)
         direction = (
-            np.cos(np.deg2rad(45)) * mean_dir
-            + sign * np.sin(np.deg2rad(45)) * np.cross(n, mean_dir)
+            np.cos(angle) * mean_dir
+            + sign * np.sin(angle) * np.cross(n, mean_dir)
         )
         direction /= np.linalg.norm(direction)
 

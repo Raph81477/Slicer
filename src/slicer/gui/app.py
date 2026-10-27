@@ -106,6 +106,8 @@ class SlicerApp(ttk.Frame):
         # k = 0 .. n_layers_contour - 1.
         # ------------------------------------------------------------------
         v["n_layers_contour"] = IntVar(value=5)
+        v["infill_angle"] = StringVar(value="45")
+        v["mean_direction_mode"] = StringVar(value="fibers")
         v["approach_distance"] = DoubleVar(value=1.0)
         v["max_connection_length"] = DoubleVar(value=2.0)
         v["merge_tolerance"] = DoubleVar(value=0.1)
@@ -342,6 +344,34 @@ class SlicerApp(ttk.Frame):
                  "isovalues are layer_width × (k + 1/2), k = 0 … n_layers_contour − 1.",
             wraplength=760,
         ).grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+
+        f2 = ttk.LabelFrame(tab, text="Infill orientation")
+        f2.pack(fill=X, pady=4)
+        f2.columnconfigure(1, weight=1)
+
+        ttk.Label(f2, text="Infill angle [°] (relative to the mean direction):").grid(
+            row=0, column=0, sticky="w", padx=4, pady=2
+        )
+        ttk.Combobox(
+            f2, textvariable=v["infill_angle"], values=("0", "45", "90"),
+            state="readonly", width=6,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Label(f2, text="Mean direction from:").grid(
+            row=1, column=0, sticky="w", padx=4, pady=2
+        )
+        ttk.Combobox(
+            f2,
+            textvariable=v["mean_direction_mode"],
+            values=("fibers", "dimensions"),
+            state="readonly",
+            width=12,
+        ).grid(row=1, column=1, sticky="w")
+        ttk.Label(
+            f2,
+            text="fibers = principal direction of the fiber paths; dimensions = "
+                 "longest in-plane axis of the piece (from its dimensions).",
+            wraplength=760,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=2)
 
         f = ttk.LabelFrame(
             tab,
@@ -733,6 +763,14 @@ class SlicerApp(ttk.Frame):
         contour_isovalues = [
             layer_width * (k + 0.5) for k in range(n_layers_contour)
         ]
+
+        # Infill orientation: angle to the mean direction (0/45/90) and how
+        # the mean direction itself is obtained.
+        infill_angle = float(params["infill_angle"])
+        mean_direction_mode = str(params["mean_direction_mode"])
+        for piece in pieces:
+            piece.infill_angle_deg = infill_angle
+            piece.mean_direction_mode = mean_direction_mode
 
         vis_path = bool(params["vis_path"])
         export_piece = bool(params["export_piece"])
