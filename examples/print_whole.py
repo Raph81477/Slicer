@@ -1,15 +1,18 @@
 """Whole-print visualization: mold, printing layers and fibers on one figure.
 
-Combines the three existing visualizations into a single PyVista plotter:
+Combines the three visualizations into a single PyVista plotter:
 
-- the mold, displayed as in mold_generationV2.py: the two families of
-  vertical slicing planes clipped to the shadow volume (toggleable),
-- the printing layers of the part, displayed as in print_layers.py:
-  offset layer surfaces and their printing paths,
+- the mold: the two families of vertical slicing planes clipped to the
+  shadow volume (toggleable),
+- the printing layers of the part: offset layer surfaces and their
+  printing paths (downsampled once, shared by the plot and the export),
 - the fiber paths saved in the "fibers" directory (one color per layer).
+
+All the configuration lives in the CONFIG block right below: change the
+variables and booleans there to change the behaviour, there are no command
+line arguments.
 """
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -26,11 +29,46 @@ from slicer.utils.visualization import build_slicing_plane_patches
 
 DIR = Path(__file__).parent.resolve()
 
-NOZZLE_DIAMETER = 0.70
-INFILL_PERCENTAGE = 5.0
-PLANE_Z = 0.0
-OFFSET_FACES = 0.05
-LIFT_OFFSET = 20.0
+# ======================================================================
+# CONFIG — edit these variables and booleans to change the behaviour
+# ======================================================================
+
+# --- Model preparation ------------------------------------------------
+MODEL_FILE = DIR / "c_beam_large_thin.dat"   # ANSYS .dat model to slice
+ROTATE_AND_LIFT = True                       # align the layer normal with Z, then lift
+N_LAYERS_UNDER_PIECE = 3                     # mold layers under the piece (lift)
+
+# --- Printing parameters ----------------------------------------------
+LAYER_HEIGHT = 0.35                          # layer thickness [mm]
+LAYER_WIDTH = 0.70                           # bead width = nozzle diameter [mm]
+N_LAYERS_CONTOUR = 5                         # contour passes (width = N x LAYER_WIDTH)
+INFILL_ANGLE = 45.0                          # infill angle to the mean direction (0/45/90)
+MEAN_DIRECTION_MODE = "fibers"                # "fibers" or "dimensions"
+APPROACH_DISTANCE = 1.0                       # approach/leave length [mm]
+MAX_CONNECTION_LENGTH = 2.0                  # above this: leave + approach [mm]
+SIMPLIFY_TOLERANCE = 0.5                     # RDP downsampling tolerance [mm] (0 disables)
+
+# --- Mold -------------------------------------------------------------
+GENERATE_MOLD = True                         # build the shadow volume + slicing planes
+INFILL_PERCENTAGE = 5.0                      # mold infill [%]
+PLANE_Z = 0.0                                # printing plane altitude
+OFFSET_FACES = 0.05                          # ray origin offset [mm]
+
+# --- Visualization ----------------------------------------------------
+VIS_MOLD = GENERATE_MOLD                     # show the mold planes
+VIS_LAYERS = 2                               # number of piece layers to display
+VIS_LAYER_HEIGHT = 0.35                      # exaggerated spacing between plotted layers
+VIS_FIBERS = True                            # show the fiber paths
+
+# --- Export ------------------------------------------------------------
+EXPORT_FIBERS = True                         # save the transformed fibers to CSV
+FIBERS_OUT = DIR / "fibers_transformed"      # output directory for the fibers
+EXPORT_PLASTIC = True                        # save the plastic paths (per-layer CSVs)
+PLASTIC_OUT = DIR / "trajectories"           # output directory for the plastic paths
+EXPORT_PLASTIC_LAYERS = None                 # number of plastic layers to export (None = all)
+EXPORT_MOLD = True                           # save the mold printing path to txt
+
+# ======================================================================
 
 PATH_COLORS = {
     "curve": "blue",
@@ -52,7 +90,11 @@ FIBER_COLORS = [
 
 
 def build_model() -> CompositeModel:
-    parser = APDLParser(DIR / "c_beam_large_thin.dat")
+    """Load the .dat model, build the CompositeModel, rotate and lift it.
+
+    The lift guarantees zmin > 0 then adds N_LAYERS_UNDER_PIECE layers
+    below the piece, exactly as the GUI does."""
+    parser = APDLParser(MODEL_FILE)
 
     model = parser.get_solid_model()[0]
     mold = parser.get_surface_mesh("MOLD")[0]
@@ -83,19 +125,83 @@ def build_model() -> CompositeModel:
         material=composite_material,
         dbc=model.dbc,
         nbc=model.nbc,
-        fiber_diameter=NOZZLE_DIAMETER,
-        layer_height=0.35,
+        fiber_diameter=LAYER_WIDTH,
+        layer_height=LAYER_HEIGHT,
     )
 
-    rot_mat = SlicedPiece.get_rotation_matrix(model)
-    SlicedMold.rotate_model(model, rot_mat)
-    SlicedMold.lift_model(model, offset=LIFT_OFFSET)
-    return model, rot_mat
+    rot_mat = np.eye(3)
+    lift_offset = 0.0
+
+    if ROTATE_AND_LIFT or GENERATE_MOLD:
+        rot_mat = SlicedPiece.get_rotation_matrix(model)
+        SlicedMold.rotate_model(model, rot_mat)
+
+        zmin = float(np.min(model.mesh.nodes[:, 2]))
+        lift_offset = N_LAYERS_UNDER_PIECE * LAYER_HEIGHT - zmin
+        SlicedMold.lift_model(model, offset=lift_offset)
+
+    return model, rot_mat, lift_offset
+
+
+def transform_fiber_paths(
+    fiber_paths: dict[int, np.ndarray],
+    rot_mat: np.ndarray,
+    lift_offset: float = 0.0,
+) -> dict[int, np.ndarray]:
+    """Apply to raw (unrotated) fiber paths the same rigid transform as the
+    model: rotation by rot_mat then translation along Z, matching
+    SlicedMold.rotate_model and SlicedMold.lift_model."""
+    transformed = {}
+    for key, path in fiber_paths.items():
+        points = (rot_mat @ path.T).T
+        if lift_offset:
+            points = points.copy()
+            points[:, 2] += lift_offset
+        transformed[key] = points
+    return transformed
+
+
+def slice_piece(model: CompositeModel, rot_mat: np.ndarray, lift_offset: float):
+    """Slice the piece and build + downsample every layer's printing path,
+    exactly as the GUI pipeline does. Returns (pieces, piece_paths)."""
+    fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
+    fiber_paths = transform_fiber_paths(fiber_paths, rot_mat, lift_offset)
+
+    pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
+
+    contour_isovalues = [
+        LAYER_WIDTH * (k + 0.5) for k in range(N_LAYERS_CONTOUR)
+    ]
+
+    piece_paths = []
+    for i, piece in enumerate(pieces):
+        piece.infill_angle_deg = INFILL_ANGLE
+        piece.mean_direction_mode = MEAN_DIRECTION_MODE
+
+        segments, _, types = piece.build_printing_path(
+            i_surface=i,
+            contour_width=N_LAYERS_CONTOUR * LAYER_WIDTH,
+            approach_distance=APPROACH_DISTANCE,
+            max_connection_length=MAX_CONNECTION_LENGTH,
+            contour_isovalues=contour_isovalues,
+            layer_width=LAYER_WIDTH,
+        )
+
+        # Downsample once: the plot and the exports below reuse these
+        # already-simplified curves.
+        segments, types = piece.analyze_and_downsample_path(
+            segments,
+            types,
+            tolerance=SIMPLIFY_TOLERANCE or None,
+            min_segment_length=2.0 * LAYER_WIDTH,
+        )
+        piece_paths.append((segments, types))
+
+    return pieces, piece_paths
 
 
 def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
-    """Shadow volume and its two families of slicing planes, as in
-    mold_generationV2.py."""
+    """Shadow volume and its two families of slicing planes."""
     shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
         model,
         plane_z=PLANE_Z,
@@ -112,7 +218,7 @@ def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
 
     patches_x, patches_y = build_slicing_plane_patches(
         shadow_volume,
-        nozzle_diameter=NOZZLE_DIAMETER,
+        nozzle_diameter=LAYER_WIDTH,
         infill_percentage=INFILL_PERCENTAGE,
     )
 
@@ -134,47 +240,27 @@ def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
             label="Planes normal to Y",
         )
 
-
-def transform_fiber_paths(
-    fiber_paths: dict[int, np.ndarray],
-    rot_mat: np.ndarray,
-    lift_offset: float = 0.0,
-) -> dict[int, np.ndarray]:
-    """Apply to raw (unrotated) fiber paths the same rigid transform as the
-    model: rotation by rot_mat then translation along Z, matching
-    SlicedMold.rotate_model and SlicedMold.lift_model."""
-    transformed = {}
-    for key, path in fiber_paths.items():
-        points = (rot_mat @ path.T).T
-        if lift_offset:
-            points = points.copy()
-            points[:, 2] += lift_offset
-        transformed[key] = points
-    return transformed
+    return shadow_volume
 
 
 def add_printing_layers(
     plotter: pv.Plotter,
-    model: CompositeModel,
-    rot_mat: np.ndarray,
+    pieces: list[SlicedPiece],
+    piece_paths: list[tuple[list, list]],
     n_layers: int,
-    vis_layer_height: float = 0.35,
 ) -> None:
-    """Part layer surfaces and printing paths, as in print_layers.py."""
-    fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
-    fiber_paths = transform_fiber_paths(
-        fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
-    )
-    pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
-
+    """Part layer surfaces and their (already downsampled) printing paths."""
     n_layers = min(n_layers, len(pieces))
     print(f"Total number of layers: {len(pieces)} (plotting {n_layers})")
 
     normal = pieces[0].normal
 
-    for i, piece in enumerate(pieces[:n_layers]):
+    for i in range(n_layers):
+        piece = pieces[i]
+        segments, types = piece_paths[i]
+
         surface_vis = piece.surface.copy()
-        surface_vis.points = piece.surface.points + i * vis_layer_height * normal
+        surface_vis.points = piece.surface.points + i * VIS_LAYER_HEIGHT * normal
         surface_vis.compute_normals(
             cell_normals=True, point_normals=False, inplace=True
         )
@@ -187,16 +273,9 @@ def add_printing_layers(
             label="Print surface",
         )
 
-        path_segments, _, segment_types = piece.build_printing_path(
-            i_surface=i,
-            contour_width=3.0,
-            approach_distance=1.0,
-            max_connection_length=4 * 0.5,
-        )
+        print(f"Layer {i}: path = {len(segments)} segments")
 
-        print(f"Layer {i}: full path = {len(path_segments)} segments")
-
-        for segment, segment_type in zip(path_segments, segment_types):
+        for segment, segment_type in zip(segments, types):
             plotter.add_mesh(
                 pv.lines_from_points(segment, close=False),
                 color=PATH_COLORS[segment_type],
@@ -204,13 +283,13 @@ def add_printing_layers(
             )
 
 
-def load_transformed_fiber_paths(
+def load_transformed_fiber_layers(
     rot_mat: np.ndarray,
-    fiber_root: Path | None = None,
+    lift_offset: float,
 ) -> dict[int, dict[int, np.ndarray]]:
     """Load every fiber layer from the fibers directory and apply the same
     rigid transform as the model (rotation then lift)."""
-    fiber_root = fiber_root or DIR / "fibers"
+    fiber_root = DIR / "fibers"
 
     layer_dirs = sorted(
         (d for d in fiber_root.glob("layer_*") if d.is_dir()),
@@ -221,20 +300,18 @@ def load_transformed_fiber_paths(
     for layer_dir in layer_dirs:
         layer = int(layer_dir.name.split("_")[-1])
         fiber_paths = SlicedPiece.load_fiber_paths(fiber_root.parent, layer=layer)
-        layers[layer] = transform_fiber_paths(
-            fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
-        )
+        layers[layer] = transform_fiber_paths(fiber_paths, rot_mat, lift_offset)
     return layers
 
 
 def export_fibers(
     rot_mat: np.ndarray,
+    lift_offset: float,
     out_directory: Path,
-    fiber_root: Path | None = None,
 ) -> list[Path]:
     """Export the (rotated + lifted) fiber paths to CSV files, in the same
     format as the oamc export (x, y, z, nx, ny, nz)."""
-    layers = load_transformed_fiber_paths(rot_mat, fiber_root)
+    layers = load_transformed_fiber_layers(rot_mat, lift_offset)
 
     written = []
     for layer, fiber_paths in layers.items():
@@ -260,66 +337,56 @@ def export_fibers(
 
 
 def export_plastic(
-    model: CompositeModel,
+    pieces: list[SlicedPiece],
+    piece_paths: list[tuple[list, list]],
     out_directory: Path,
-    n_layers: int | None = None,
-    simplify_tolerance: float | None = None,
 ) -> None:
-    """Export the plastic printing paths of every layer to CSV files, one
-    subdirectory per layer (layer_i/segment_j.csv), in the same (already
-    rotated and lifted) frame as the transformed fibers. The model itself
-    has already been rotated and lifted in place by build_model."""
-    fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
-    pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
-
-    if n_layers is not None:
-        pieces = pieces[:n_layers]
+    """Export the (already downsampled) plastic printing paths to CSV files,
+    one subdirectory per layer (layer_i/segment_j.csv), in the same
+    (already rotated and lifted) frame as the transformed fibers."""
+    n_layers = EXPORT_PLASTIC_LAYERS or len(pieces)
 
     SlicedPiece.export_layers_to_csv(
-        pieces,
+        pieces[:n_layers],
         out_directory,
-        contour_width=3.0,
-        approach_distance=1.0,
-        max_connection_length=4 * 0.5,
-        simplify_tolerance=simplify_tolerance,
+        piece_paths=piece_paths[:n_layers],
+    )
+
+
+def export_mold(model: CompositeModel, out_directory: Path) -> None:
+    """Slice the shadow volume and export the mold printing path to txt."""
+    part_surface = SlicedMold._outer_surface(model)
+    shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
+        model,
+        plane_z=PLANE_Z,
+        offset_faces=OFFSET_FACES,
+    )
+    mold_layers = SlicedMold.slice_shadow_volume(
+        shadow_volume=shadow_volume,
+        part_surface=part_surface,
+        layer_height=LAYER_HEIGHT,
+        nozzle_diameter=LAYER_WIDTH,
+        infill_percentage=INFILL_PERCENTAGE,
+        plane_z=PLANE_Z,
+    )
+
+    SlicedMold.export_layers_to_txt(
+        mold_layers,
+        out_directory / "mold_path.txt",
+        nozzle_diameter=LAYER_WIDTH,
+        infill_percentage=INFILL_PERCENTAGE,
+        approach_distance=APPROACH_DISTANCE,
+        layer_height=LAYER_HEIGHT,
     )
 
 
 def add_fibers(
     plotter: pv.Plotter,
-    rot_mat: np.ndarray,
-    fiber_root: Path | None = None,
+    fiber_layers: dict[int, dict[int, np.ndarray]],
 ) -> None:
-    """Fiber paths saved in the fibers directory, one color per layer."""
-    fiber_root = fiber_root or DIR / "fibers"
-
-    layer_dirs = sorted(
-        (d for d in fiber_root.glob("layer_*") if d.is_dir()),
-        key=lambda d: int(d.name.split("_")[-1]),
-    )
-
-    for i, layer_dir in enumerate(layer_dirs):
-        layer = int(layer_dir.name.split("_")[-1])
+    """Fiber paths, one color per layer."""
+    for i, (layer, fiber_paths) in enumerate(sorted(fiber_layers.items())):
         color = FIBER_COLORS[i % len(FIBER_COLORS)]
-
-        fiber_paths = SlicedPiece.load_fiber_paths(fiber_root.parent, layer=layer)
-        fiber_paths = transform_fiber_paths(
-            fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
-        )
-
-    layer_dirs = sorted(
-        (d for d in fiber_root.glob("layer_*") if d.is_dir()),
-        key=lambda d: int(d.name.split("_")[-1]),
-    )
-
-    for i, layer_dir in enumerate(layer_dirs):
-        layer = int(layer_dir.name.split("_")[-1])
-        color = FIBER_COLORS[i % len(FIBER_COLORS)]
-
-        fiber_paths = SlicedPiece.load_fiber_paths(fiber_root.parent, layer=layer)
-        fiber_paths = transform_fiber_paths(
-            fiber_paths, rot_mat, lift_offset=LIFT_OFFSET
-        )
 
         for fiber_path in fiber_paths.values():
             plotter.add_mesh(
@@ -330,101 +397,69 @@ def add_fibers(
             )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Display mold, printing layers and fibers on one figure."
-    )
-    parser.add_argument(
-        "--no-mold",
-        action="store_true",
-        help="Do not display the mold (shadow volume and slicing planes).",
-    )
-    parser.add_argument(
-        "--layers",
-        type=int,
-        default=2,
-        help="Number of part printing layers to display (default: 2).",
-    )
-    parser.add_argument(
-        "--no-export-fibers",
-        action="store_true",
-        help=(
-            "Skip the export of the rotated and lifted fiber paths to "
-            "CSV files (exported by default)."
-        ),
-    )
-    parser.add_argument(
-        "--fibers-out",
-        type=Path,
-        default=DIR / "fibers_transformed",
-        help=(
-            "Output directory for --export-fibers "
-            f"(default: {DIR / 'fibers_transformed'})."
-        ),
-    )
-    parser.add_argument(
-        "--no-export-plastic",
-        action="store_true",
-        help=(
-            "Skip the export of the plastic printing paths to "
-            "CSV files (exported by default)."
-        ),
-    )
-    parser.add_argument(
-        "--plastic-out",
-        type=Path,
-        default=DIR / "trajectories",
-        help=(
-            "Output directory for the plastic paths, one subdirectory "
-            "per layer (default: {DIR / 'trajectories'})."
-        ),
-    )
-    parser.add_argument(
-        "--export-plastic-layers",
-        type=int,
-        default=None,
-        help=(
-            "Number of plastic layers to export (default: all)."
-        ),
-    )
-    parser.add_argument(
-        "--simplify-tolerance",
-        type=float,
-        default=0.5,
-        help=(
-            "Ramer-Douglas-Peucker tolerance (mm) applied to the plastic "
-            "paths before export (default: 0.5, 0 disables)."
-        ),
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
     enable_logging()
     print(BANNER)
 
-    args = parse_args()
+    # 1. Model (rotation + lift, same convention as the GUI)
+    model, rot_mat, lift_offset = build_model()
 
-    model, rot_mat = build_model()
+    # 2. Piece: slice + build + downsample the paths (shared by plot/export)
+    pieces, piece_paths = slice_piece(model, rot_mat, lift_offset)
 
-    if not args.no_export_fibers:
-        export_fibers(rot_mat, args.fibers_out)
-
-    if not args.no_export_plastic:
-        export_plastic(
+    # 3. Mold shadow volume (needed for the planes and the mold export)
+    shadow_volume = None
+    if GENERATE_MOLD:
+        shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
             model,
-            args.plastic_out,
-            n_layers=args.export_plastic_layers,
-            simplify_tolerance=args.simplify_tolerance or None,
+            plane_z=PLANE_Z,
+            offset_faces=OFFSET_FACES,
         )
 
+    # 4. Exports
+    if EXPORT_FIBERS:
+        export_fibers(rot_mat, lift_offset, FIBERS_OUT)
+
+    if EXPORT_PLASTIC:
+        export_plastic(pieces, piece_paths, PLASTIC_OUT)
+
+    if GENERATE_MOLD and EXPORT_MOLD:
+        export_mold(model, PLASTIC_OUT)
+
+    # 5. Visualization
     plotter = pv.Plotter(title="Whole print: mold + layers + fibers")
 
-    if not args.no_mold:
-        add_mold(plotter, model)
+    if VIS_MOLD and shadow_volume is not None:
+        plotter.add_mesh(
+            shadow_volume.extract_surface(algorithm="dataset_surface"),
+            color="gray",
+            opacity=0.1,
+            show_edges=False,
+            label="Shadow volume",
+        )
 
-    add_printing_layers(plotter, model, rot_mat, n_layers=args.layers)
-    add_fibers(plotter, rot_mat)
+        patches_x, patches_y = build_slicing_plane_patches(
+            shadow_volume,
+            nozzle_diameter=LAYER_WIDTH,
+            infill_percentage=INFILL_PERCENTAGE,
+        )
+        for patch in patches_x:
+            plotter.add_mesh(
+                patch, color="blue", opacity=0.35, show_edges=False,
+                label="Planes normal to X",
+            )
+        for patch in patches_y:
+            plotter.add_mesh(
+                patch, color="red", opacity=0.35, show_edges=False,
+                label="Planes normal to Y",
+            )
+
+    if VIS_LAYERS > 0:
+        add_printing_layers(plotter, pieces, piece_paths, n_layers=VIS_LAYERS)
+
+    if VIS_FIBERS:
+        fiber_layers = load_transformed_fiber_layers(rot_mat, lift_offset)
+        add_fibers(plotter, fiber_layers)
 
     plotter.add_legend()
     plotter.show()
