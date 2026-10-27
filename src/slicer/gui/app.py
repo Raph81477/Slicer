@@ -793,6 +793,7 @@ class SlicerApp(ttk.Frame):
                     max_connection_length=float(params["max_connection_length"]),
                     contour_isovalues=contour_isovalues,
                     merge_tolerance=float(params["merge_tolerance"]),
+                    layer_width=layer_width,
                 )
                 piece_paths.append((segments, types))
 
@@ -810,6 +811,7 @@ class SlicerApp(ttk.Frame):
                 max_connection_length=float(params["max_connection_length"]),
                 contour_isovalues=contour_isovalues,
                 include_orientation=True,
+                layer_width=layer_width,
             )
 
         if mold_generation and mold_layers and params["export_mold"]:

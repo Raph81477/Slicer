@@ -190,12 +190,14 @@ class SlicedPiece(SlicedObject):
             return self.direction_from_dimensions()
         return self.fiber_mean_direction
 
-    def generate_slicing_planes(self, i_surface: int = 0, spacing: float = 0.5):
+    def generate_slicing_planes(self, i_surface: int = 0, spacing: float = 0.70):
         """
         Generate the infill slicing planes for this layer, alternating the
         offset direction every other layer (relative to the mean direction
         given by infill_mean_direction, at infill_angle_deg degrees).
-        `spacing` is the distance between two planes.
+        `spacing` is the distance between two planes; it must match the
+        bead width (layer_width / nozzle diameter) so that the infill lines
+        are spaced like the contour shells.
         """
         mean_dir = self.infill_mean_direction
         n = self.normal
@@ -484,12 +486,17 @@ class SlicedPiece(SlicedObject):
         max_connection_length: float = 2.0,
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
         merge_tolerance: float = 0.1,
+        layer_width: float = 0.70,
     ):
         """
         Build the full printing path for this piece layer: fiber-aligned
         infill lines (cut from the inner offset zone by the fiber-aligned
         slicing planes) plus distance-to-boundary contour shells, stitched
         together as in build_full_printing_path.
+
+        layer_width is the bead width (nozzle diameter): it sets the
+        spacing of the infill slicing planes, so the infill lines are
+        spaced exactly like the contour shells (one bead width apart).
         """
         # Merge coincident points first: an isosurface extracted from the
         # model's grid can have duplicate points along its boundary, which
@@ -499,7 +506,7 @@ class SlicedPiece(SlicedObject):
         # (normals, distance field), since the point indexing changes.
         self.surface = self.surface.merge_points(tolerance=merge_tolerance)
 
-        planes = self.generate_slicing_planes(i_surface=i_surface)
+        planes = self.generate_slicing_planes(i_surface=i_surface, spacing=layer_width)
         inner_zone = self.build_offset_surface(contour_width, invert=False)
 
         # Single-pass cut of the inner zone with all the planes
@@ -529,12 +536,16 @@ class SlicedPiece(SlicedObject):
         include_orientation: bool = False,
         approach_sign: float = -1.0,
         simplify_tolerance: float | None = None,
+        layer_width: float = 0.70,
     ) -> None:
         """
         Build the full printing path for every given piece layer and
         write the whole trajectory (all layers, in order) to a single
         text file, ready to be loaded by an external trajectory simulator
         such as RoboDK.
+
+        layer_width sets the infill slicing plane spacing (one bead width),
+        so infill and contour lines are evenly spaced.
 
         simplify_tolerance: when given, each segment is simplified with
         Ramer-Douglas-Peucker (see SlicedObject.simplify_polyline) before
@@ -549,6 +560,7 @@ class SlicedPiece(SlicedObject):
                 approach_distance=approach_distance,
                 max_connection_length=max_connection_length,
                 contour_isovalues=contour_isovalues,
+                layer_width=layer_width,
             )
 
             piece.export_printing_path(
@@ -575,11 +587,14 @@ class SlicedPiece(SlicedObject):
         contour_isovalues=(0.5, 1.0, 1.5, 2.0, 2.5),
         approach_sign: float = -1.0,
         simplify_tolerance: float | None = None,
+        layer_width: float = 0.70,
     ) -> None:
         """
         Export the plastic printing paths of every layer, one directory
         per layer: <directory>/layer_i/segment_j.csv, mirroring the fiber
         layout saved by oamc's save_fibers (fibers/layer_i/fiber_i_j.csv).
+
+        layer_width sets the infill slicing plane spacing (one bead width).
 
         Each CSV file holds one continuous path segment (curve, approach,
         leave or connection) with the columns
@@ -600,6 +615,7 @@ class SlicedPiece(SlicedObject):
                 approach_distance=approach_distance,
                 max_connection_length=max_connection_length,
                 contour_isovalues=contour_isovalues,
+                layer_width=layer_width,
             )
 
             if simplify_tolerance is not None:
