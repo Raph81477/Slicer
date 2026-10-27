@@ -52,8 +52,12 @@ class SlicerApp(ttk.Frame):
 
     def __init__(self, master=None):
         super().__init__(master)
-        self.master.title("Slicer non planaire — bras 6 ddl")
+        self.master.title("Non-planar slicer — 6-DOF robotic arm")
         self.master.geometry("980x860")
+
+        # The frame itself must be packed inside the root window,
+        # otherwise the window shows up empty (all white).
+        self.pack(fill=BOTH, expand=True)
 
         self.vars: dict[str, object] = {}
         self._build_variables()
@@ -160,11 +164,11 @@ class SlicerApp(ttk.Frame):
         self.tab_viz = ttk.Frame(nb, padding=8)
         self.tab_material = ttk.Frame(nb, padding=8)
 
-        nb.add(self.tab_files, text="Fichiers")
-        nb.add(self.tab_params, text="Paramètres d'impression")
-        nb.add(self.tab_mold, text="Moule")
-        nb.add(self.tab_viz, text="Visualisation")
-        nb.add(self.tab_material, text="Matériaux")
+        nb.add(self.tab_files, text="Files")
+        nb.add(self.tab_params, text="Printing parameters")
+        nb.add(self.tab_mold, text="Mold")
+        nb.add(self.tab_viz, text="Visualization")
+        nb.add(self.tab_material, text="Materials")
 
         self._build_files_tab()
         self._build_params_tab()
@@ -178,15 +182,15 @@ class SlicerApp(ttk.Frame):
         bar = ttk.Frame(self, padding=(8, 4))
         bar.pack(fill=X, side=BOTTOM)
 
-        self.run_button = ttk.Button(bar, text="Lancer le slicing", command=self.on_run)
+        self.run_button = ttk.Button(bar, text="Run slicing", command=self.on_run)
         self.run_button.pack(side=LEFT)
 
-        ttk.Button(bar, text="Quitter", command=self.master.destroy).pack(side=RIGHT)
+        ttk.Button(bar, text="Quit", command=self.master.destroy).pack(side=RIGHT)
 
         self.progress = ttk.Progressbar(bar, mode="indeterminate")
         self.progress.pack(side=LEFT, padx=10, fill=X, expand=True)
 
-        self.status = ttk.Label(bar, text="Prêt.")
+        self.status = ttk.Label(bar, text="Ready.")
         self.status.pack(side=LEFT, padx=10)
 
         self.log = ttk.Treeview(self, height=8, columns=("msg",), show="")
@@ -208,60 +212,60 @@ class SlicerApp(ttk.Frame):
             if path:
                 var.set(path)
 
-        f = ttk.LabelFrame(tab, text="Modèle ANSYS (.dat)")
+        f = ttk.LabelFrame(tab, text="ANSYS model (.dat)")
         f.pack(fill=X, pady=4)
         f.columnconfigure(1, weight=1)
-        ttk.Label(f, text="Fichier .dat :").grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(f, text=".dat file:").grid(row=0, column=0, sticky="w", padx=4, pady=2)
         ttk.Entry(f, textvariable=v["dat_path"]).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(
-            f, text="Parcourir…",
+            f, text="Browse…",
             command=lambda: browse_file(
-                v["dat_path"], "Choisir le fichier .dat", [("ANSYS dat", "*.dat"), ("Tous", "*.*")]
+                v["dat_path"], "Select the .dat file", [("ANSYS dat", "*.dat"), ("All files", "*.*")]
             ),
         ).grid(row=0, column=2, padx=4)
 
-        f = ttk.LabelFrame(tab, text="Fibres (fichiers CSV exportés par OAMC)")
+        f = ttk.LabelFrame(tab, text="Fibers (CSV files exported by OAMC)")
         f.pack(fill=X, pady=4)
         f.columnconfigure(1, weight=1)
-        ttk.Label(f, text="Dossier des fibres (contient fibers/layer_*) :").grid(
+        ttk.Label(f, text="Fiber directory (contains fibers/layer_*):").grid(
             row=0, column=0, sticky="w", padx=4, pady=2
         )
         ttk.Entry(f, textvariable=v["fiber_dir"]).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(
-            f, text="Parcourir…", command=lambda: browse_dir(v["fiber_dir"], "Dossier des fibres")
+            f, text="Browse…", command=lambda: browse_dir(v["fiber_dir"], "Fiber directory")
         ).grid(row=0, column=2, padx=4)
 
         ttk.Checkbutton(
             f,
-            text="Sauvegarder les fibres transformées (après rotation + lift)",
+            text="Save transformed fibers (after rotation + lift)",
             variable=v["mold_generation"],
             command=self._on_mold_toggle,
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=4, pady=2)
 
-        ttk.Label(f, text="Dossier des fibres transformées :").grid(
+        ttk.Label(f, text="Transformed fibers directory:").grid(
             row=2, column=0, sticky="w", padx=4, pady=2
         )
         self.entry_transformed_fibers = ttk.Entry(f, textvariable=v["transformed_fiber_dir"])
         self.entry_transformed_fibers.grid(row=2, column=1, sticky="ew", padx=4)
         self.btn_transformed_fibers = ttk.Button(
-            f, text="Parcourir…",
+            f, text="Browse…",
             command=lambda: browse_dir(
-                v["transformed_fiber_dir"], "Dossier des fibres transformées"
+                v["transformed_fiber_dir"], "Transformed fibers directory"
             ),
         )
         self.btn_transformed_fibers.grid(row=2, column=2, padx=4)
 
-        f = ttk.LabelFrame(tab, text="Export des trajectoires")
+        f = ttk.LabelFrame(tab, text="Trajectory export")
         f.pack(fill=X, pady=4)
         f.columnconfigure(1, weight=1)
         ttk.Checkbutton(
-            f, text="Exporter la trajectoire de la pièce", variable=v["export_piece"]
+            f, text="Export the piece trajectory", variable=v["export_piece"]
         ).grid(row=0, column=0, columnspan=3, sticky="w", padx=4)
-        ttk.Label(f, text="Dossier d'export :").grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(f, text="Export directory:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
         ttk.Entry(f, textvariable=v["export_piece_dir"]).grid(row=1, column=1, sticky="ew", padx=4)
         ttk.Button(
-            f, text="Parcourir…",
-            command=lambda: browse_dir(v["export_piece_dir"], "Dossier d'export des trajectoires"),
+            f, text="Browse…",
+            command=lambda: browse_dir(v["export_piece_dir"], "Trajectory export directory"),
         ).grid(row=1, column=2, padx=4)
 
         self._on_mold_toggle()
@@ -271,16 +275,16 @@ class SlicerApp(ttk.Frame):
         tab = self.tab_params
         v = self.vars
 
-        f = ttk.LabelFrame(tab, text="Paramètres d'impression")
+        f = ttk.LabelFrame(tab, text="Printing parameters")
         f.pack(fill=X, pady=4)
         for c in range(4):
             f.columnconfigure(c, weight=1)
 
         rows = [
-            ("layer_height", "layer_height [mm] (épaisseur de couche)"),
-            ("layer_width", "layer_width [mm] (diamètre buse)"),
-            ("fiber_diameter", "diamètre des fibres [mm]"),
-            ("n_layers_under_piece", "n_layers_under_piece (couches sous la pièce)"),
+            ("layer_height", "layer_height [mm] (layer thickness)"),
+            ("layer_width", "layer_width [mm] (nozzle diameter)"),
+            ("fiber_diameter", "fiber diameter [mm]"),
+            ("n_layers_under_piece", "n_layers_under_piece (layers under the piece)"),
         ]
         for i, (key, label) in enumerate(rows):
             ttk.Label(f, text=label).grid(
@@ -290,24 +294,24 @@ class SlicerApp(ttk.Frame):
                 f, from_=0.01, to=100.0, increment=0.01, textvariable=v[key], width=10
             ).grid(row=i, column=2, sticky="e", padx=4)
 
-        f = ttk.LabelFrame(tab, text="Options de préparation du modèle")
+        f = ttk.LabelFrame(tab, text="Model preparation options")
         f.pack(fill=X, pady=4)
         self.chk_rotate = ttk.Checkbutton(
             f,
-            text="Rotate and lift model (rotation pour aligner la normale des couches sur Z)",
+            text="Rotate and lift model (rotate to align the layer normal with Z)",
             variable=v["rotate_and_lift"],
         )
         self.chk_rotate.pack(anchor="w", padx=4, pady=2)
         self.chk_mold = ttk.Checkbutton(
             f,
-            text="Mold generation (génère le moule sous la pièce — active rotate and lift)",
+            text="Mold generation (generate the mold under the piece — enables rotate and lift)",
             variable=v["mold_generation"],
             command=self._on_mold_toggle,
         )
         self.chk_mold.pack(anchor="w", padx=4, pady=2)
 
         f = ttk.LabelFrame(
-            tab, text="Paramètres du path de la pièce (contours, connections)"
+            tab, text="Piece path parameters (contours, connections)"
         )
         f.pack(fill=X, pady=4)
         for c in range(4):
@@ -327,7 +331,7 @@ class SlicerApp(ttk.Frame):
                 f, from_=0.0, to=1000.0, increment=0.1, textvariable=v[key], width=10
             ).grid(row=i, column=2, sticky="e", padx=4)
 
-        ttk.Label(f, text="contour_isovalues [mm] (séparés par des virgules)").grid(
+        ttk.Label(f, text="contour_isovalues [mm] (comma-separated)").grid(
             row=4, column=0, columnspan=2, sticky="w", padx=4, pady=2
         )
         ttk.Entry(f, textvariable=v["contour_isovalues"], width=30).grid(
@@ -336,32 +340,32 @@ class SlicerApp(ttk.Frame):
 
         f = ttk.LabelFrame(
             tab,
-            text="Extraction des edges (extract_feature_edges — bords de surface "
-                 "utilisés pour le calcul des contours)",
+            text="Edge extraction (extract_feature_edges — surface boundary "
+                 "used for the contour computation)",
         )
         f.pack(fill=X, pady=4)
         for c in range(4):
             f.columnconfigure(c, weight=1)
 
-        ttk.Label(f, text="feature_angle [°] (angle entre faces adjacentes)").grid(
+        ttk.Label(f, text="feature_angle [°] (angle between adjacent faces)").grid(
             row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2
         )
         ttk.Spinbox(
             f, from_=0.0, to=180.0, increment=1.0, textvariable=v["feature_angle"], width=10
         ).grid(row=0, column=2, sticky="e", padx=4)
         ttk.Checkbutton(
-            f, text="boundary_edges (bords ouverts)", variable=v["boundary_edges"]
+            f, text="boundary_edges (open borders)", variable=v["boundary_edges"]
         ).grid(row=1, column=0, sticky="w", padx=4)
         ttk.Checkbutton(
-            f, text="non_manifold_edges (arêtes non manifold)", variable=v["non_manifold_edges"]
+            f, text="non_manifold_edges (non-manifold edges)", variable=v["non_manifold_edges"]
         ).grid(row=1, column=1, sticky="w", padx=4)
 
         info = ttk.Label(
             tab,
-            text="Note : l'extraction des contours se base sur les bords de surface "
-                 "détectés par ces paramètres (angle, bords ouverts, arêtes non "
-                 "manifold). Le lift du moule garantit que zmin(modèle) > 0 puis "
-                 "ajoute n_layers_under_piece × layer_height.",
+            text="Note: contour extraction relies on the surface edges detected "
+                 "with these parameters (angle, open borders, non-manifold "
+                 "edges). The mold lift guarantees zmin(model) > 0, then adds "
+                 "n_layers_under_piece × layer_height.",
             wraplength=900,
         )
         info.pack(anchor="w", padx=4, pady=6)
@@ -371,10 +375,10 @@ class SlicerApp(ttk.Frame):
         tab = self.tab_mold
         v = self.vars
 
-        f = ttk.LabelFrame(tab, text="Génération du moule (mold inférieur)")
+        f = ttk.LabelFrame(tab, text="Mold generation (bottom mold)")
         f.pack(fill=X, pady=4)
 
-        ttk.Label(f, text="Méthode de shadow volume :").grid(
+        ttk.Label(f, text="Shadow volume method:").grid(
             row=0, column=0, sticky="w", padx=4, pady=2
         )
         cb = ttk.Combobox(
@@ -398,11 +402,11 @@ class SlicerApp(ttk.Frame):
 
         info = ttk.Label(
             tab,
-            text="Le moule est généré sous la pièce : le modèle est d'abord lifté "
-                 "pour que son zmin soit positif, puis encore lifté de "
-                 "n_layers_under_piece × layer_height (voir Paramètres "
-                 "d'impression). Si la génération du moule est activée, le lift "
-                 "du modèle est imposé.",
+            text="The mold is generated under the piece: the model is first "
+                 "lifted so that its zmin is positive, then lifted again by "
+                 "n_layers_under_piece × layer_height (see Printing "
+                 "parameters). When mold generation is enabled, the model "
+                 "lift is enforced.",
             wraplength=900,
         )
         info.pack(anchor="w", padx=4, pady=6)
@@ -413,23 +417,23 @@ class SlicerApp(ttk.Frame):
         v = self.vars
 
         f = ttk.LabelFrame(
-            tab, text="Visualisation (figure PyVista externe)"
+            tab, text="Visualization (external PyVista figure)"
         )
         f.pack(fill=X, pady=4)
 
         rows = [
-            ("vis_model", "Modèle (surfaces des couches de la pièce)"),
-            ("vis_edges", "Edges détectés (extract_feature_edges, calcul des contours)"),
-            ("vis_path", "Path d'impression (courbes, connections, approach/leave)"),
-            ("vis_mold", "Moule (visualisation par plans de slicing)"),
-            ("vis_legend", "Légende"),
+            ("vis_model", "Model (piece layer surfaces)"),
+            ("vis_edges", "Detected edges (extract_feature_edges, contour computation)"),
+            ("vis_path", "Printing path (curves, connections, approach/leave)"),
+            ("vis_mold", "Mold (slicing plane visualization)"),
+            ("vis_legend", "Legend"),
         ]
         for i, (key, label) in enumerate(rows):
             ttk.Checkbutton(f, text=label, variable=v[key]).grid(
                 row=i, column=0, sticky="w", padx=4, pady=2
             )
 
-        ttk.Label(f, text="Couches à visualiser (ex: 0-4 ou 2,5,7) :").grid(
+        ttk.Label(f, text="Layers to visualize (e.g. 0-4 or 2,5,7):").grid(
             row=0, column=1, sticky="w", padx=12, pady=2
         )
         ttk.Entry(f, textvariable=v["vis_layers_range"], width=15).grid(
@@ -438,8 +442,8 @@ class SlicerApp(ttk.Frame):
 
         ttk.Label(
             f,
-            text="Le path d'impression est tracé avec : courbes = bleu, connections "
-                 "= rouge, approach = vert, leave = orange.",
+            text="The printing path is drawn with: curves = blue, connections "
+                 "= red, approach = green, leave = orange.",
         ).grid(row=6, column=0, columnspan=3, sticky="w", padx=4, pady=2)
 
     # ------------------------------------------------------------------
@@ -447,7 +451,7 @@ class SlicerApp(ttk.Frame):
         tab = self.tab_material
         v = self.vars
 
-        f = ttk.LabelFrame(tab, text="Fibre (transversement isotrope)")
+        f = ttk.LabelFrame(tab, text="Fiber (transversely isotropic)")
         f.pack(fill=X, pady=4)
         for c in range(2):
             f.columnconfigure(c, weight=1)
@@ -464,7 +468,7 @@ class SlicerApp(ttk.Frame):
                 f, from_=0.0, to=1e7, increment=10.0, textvariable=v[key], width=12
             ).grid(row=i, column=1, sticky="w")
 
-        f = ttk.LabelFrame(tab, text="Matrice (isotrope)")
+        f = ttk.LabelFrame(tab, text="Matrix (isotropic)")
         f.pack(fill=X, pady=4)
         for c in range(2):
             f.columnconfigure(c, weight=1)
@@ -526,12 +530,12 @@ class SlicerApp(ttk.Frame):
 
     def on_run(self) -> None:
         if self._worker is not None and self._worker.is_alive():
-            messagebox.showwarning("En cours", "Un calcul est déjà en cours.")
+            messagebox.showwarning("Busy", "A computation is already running.")
             return
 
         self.run_button.configure(state="disabled")
         self.progress.start(20)
-        self.status.configure(text="Calcul en cours…")
+        self.status.configure(text="Computing…")
         self.log.delete(*self.log.get_children())
 
         params = {k: v.get() for k, v in self.vars.items()}
@@ -571,7 +575,7 @@ class SlicerApp(ttk.Frame):
 
         dat_path = Path(params["dat_path"])
         if not dat_path.is_file():
-            raise FileNotFoundError(f"Fichier .dat introuvable : {dat_path}")
+            raise FileNotFoundError(f".dat file not found: {dat_path}")
 
         fiber_dir = Path(params["fiber_dir"])
 
@@ -753,23 +757,23 @@ class SlicerApp(ttk.Frame):
         self.run_button.configure(state="normal")
 
         if kind == "error":
-            self.status.configure(text="Erreur pendant le calcul.")
-            self.log_message("ERREUR :")
+            self.status.configure(text="Error during the computation.")
+            self.log_message("ERROR:")
             for line in payload.strip().splitlines()[-30:]:
                 self.log_message(line)
-            messagebox.showerror("Erreur", payload.strip().splitlines()[-1])
+            messagebox.showerror("Error", payload.strip().splitlines()[-1])
         else:
-            self.status.configure(text="Calcul terminé.")
-            self.log_message("Calcul terminé.")
+            self.status.configure(text="Computation finished.")
+            self.log_message("Computation finished.")
             self._computed = payload
             try:
                 self._show_visualization(payload)
             except Exception:
                 err = traceback.format_exc()
-                self.log_message("ERREUR (visualisation) :")
+                self.log_message("ERROR (visualization):")
                 for line in err.strip().splitlines()[-20:]:
                     self.log_message(line)
-                messagebox.showerror("Erreur (visualisation)", err.strip().splitlines()[-1])
+                messagebox.showerror("Error (visualization)", err.strip().splitlines()[-1])
 
         self.after(100, self._poll_result_queue)
 
@@ -779,7 +783,7 @@ class SlicerApp(ttk.Frame):
 
     def _show_visualization(self, result: dict) -> None:
         if pv is None:
-            raise ImportError("pyvista est requis pour la visualisation")
+            raise ImportError("pyvista is required for the visualization")
 
         params = result["params"]
         pieces = result["pieces"]
@@ -791,7 +795,7 @@ class SlicerApp(ttk.Frame):
             str(params["vis_layers_range"]), len(pieces)
         )
 
-        plotter = pv.Plotter(title="Slicer — visualisation")
+        plotter = pv.Plotter(title="Slicer — visualization")
 
         # ------------------------------------------------------------------
         # Model (layer surfaces) + edges
@@ -804,7 +808,7 @@ class SlicerApp(ttk.Frame):
                         color="lightblue",
                         opacity=0.1,
                         show_edges=True,
-                        label="Modèle (couche)" if i == vis_layers[0] else None,
+                        label="Model (layer)" if i == vis_layers[0] else None,
                     )
 
         if params["vis_edges"]:
@@ -820,7 +824,7 @@ class SlicerApp(ttk.Frame):
                             edges,
                             color="black",
                             line_width=3,
-                            label="Edges détectés" if i == vis_layers[0] else None,
+                            label="Detected edges" if i == vis_layers[0] else None,
                         )
 
         # ------------------------------------------------------------------
@@ -853,14 +857,14 @@ class SlicerApp(ttk.Frame):
                     patch,
                     color="blue",
                     opacity=0.35,
-                    label="Moule — plans ⊥ X" if j == 0 else None,
+                    label="Mold — planes ⊥ X" if j == 0 else None,
                 )
             for j, patch in enumerate(patches_y):
                 plotter.add_mesh(
                     patch,
                     color="red",
                     opacity=0.35,
-                    label="Moule — plans ⊥ Y" if j == 0 else None,
+                    label="Mold — planes ⊥ Y" if j == 0 else None,
                 )
         elif params["vis_mold"] and mold_layers:
             # No shadow volume (should not happen): fall back on the layers
@@ -870,7 +874,7 @@ class SlicerApp(ttk.Frame):
                         pv.lines_from_points(poly, close=False),
                         color="orange",
                         line_width=2,
-                        label="Moule (contours)" if j == 0 else None,
+                        label="Mold (contours)" if j == 0 else None,
                     )
 
         if params["vis_legend"]:
