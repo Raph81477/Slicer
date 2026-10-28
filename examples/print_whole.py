@@ -206,49 +206,6 @@ def slice_piece_paths(pieces: list[SlicedPiece]):
     return piece_paths
 
 
-def add_mold(plotter: pv.Plotter, model: CompositeModel) -> None:
-    """Shadow volume and its two families of slicing planes."""
-    shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
-        model,
-        plane_z=PLANE_Z,
-        offset_faces=OFFSET_FACES,
-    )
-
-    plotter.add_mesh(
-        shadow_volume.extract_surface(algorithm="dataset_surface"),
-        color="gray",
-        opacity=0.1,
-        show_edges=False,
-        label="Shadow volume",
-    )
-
-    patches_x, patches_y = build_slicing_plane_patches(
-        shadow_volume,
-        nozzle_diameter=LAYER_WIDTH,
-        infill_percentage=INFILL_PERCENTAGE,
-    )
-
-    for patch in patches_x:
-        plotter.add_mesh(
-            patch,
-            color="blue",
-            opacity=0.35,
-            show_edges=False,
-            label="Planes normal to X",
-        )
-
-    for patch in patches_y:
-        plotter.add_mesh(
-            patch,
-            color="red",
-            opacity=0.35,
-            show_edges=False,
-            label="Planes normal to Y",
-        )
-
-    return shadow_volume
-
-
 def resolve_layer_selection(selection, n_total: int, name: str) -> list[int]:
     """Resolve a layer selection into an explicit list of indices.
 
@@ -396,23 +353,8 @@ def export_plastic(
     )
 
 
-def export_mold(model: CompositeModel, out_directory: Path) -> None:
-    """Slice the shadow volume and export the mold printing path to txt."""
-    part_surface = SlicedMold._outer_surface(model)
-    shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
-        model,
-        plane_z=PLANE_Z,
-        offset_faces=OFFSET_FACES,
-    )
-    mold_layers = SlicedMold.slice_shadow_volume(
-        shadow_volume=shadow_volume,
-        part_surface=part_surface,
-        layer_height=LAYER_HEIGHT,
-        nozzle_diameter=LAYER_WIDTH,
-        infill_percentage=INFILL_PERCENTAGE,
-        plane_z=PLANE_Z,
-    )
-
+def export_mold(mold_layers: list, out_directory: Path) -> None:
+    """Export the (already sliced) mold printing path to txt."""
     SlicedMold.export_layers_to_txt(
         mold_layers,
         out_directory / "mold_path.txt",
@@ -459,42 +401,39 @@ def main() -> None:
         if VIS_LAYERS is not None else []
     )
 
-    mold_layers = []
-    if GENERATE_MOLD and VIS_MOLD_LAYERS is not None:
-        part_surface = SlicedMold._outer_surface(model)
-        shadow_volume_for_layers, _, _ = SlicedMold.get_shadow_volume_vertical(
-            model,
-            plane_z=PLANE_Z,
-            offset_faces=OFFSET_FACES,
-        )
-        mold_layers = SlicedMold.slice_shadow_volume(
-            shadow_volume=shadow_volume_for_layers,
-            part_surface=part_surface,
-            layer_height=LAYER_HEIGHT,
-            nozzle_diameter=LAYER_WIDTH,
-            infill_percentage=INFILL_PERCENTAGE,
-            plane_z=PLANE_Z,
-        )
-        mold_layer_indices = resolve_layer_selection(
-            VIS_MOLD_LAYERS, len(mold_layers), "mold"
-        )
-    else:
-        mold_layer_indices = []
-
     need_paths = (
         bool(piece_layer_indices)
         or EXPORT_PLASTIC
     )
     piece_paths = slice_piece_paths(pieces) if need_paths else []
 
-    # 3. Mold shadow volume (needed for the planes and the mold export)
+    # 3. Mold, computed ONCE: the shadow volume (for the planes and the
+    #    layer slicing), the outer surface and the sliced layers are shared
+    #    by the visualization and the export.
     shadow_volume = None
+    mold_layers = []
+    mold_layer_indices = []
+    need_mold_layers = (VIS_MOLD_LAYERS is not None) or EXPORT_MOLD
     if GENERATE_MOLD:
+        part_surface = SlicedMold._outer_surface(model)
         shadow_volume, _, _ = SlicedMold.get_shadow_volume_vertical(
             model,
             plane_z=PLANE_Z,
             offset_faces=OFFSET_FACES,
         )
+        if need_mold_layers:
+            mold_layers = SlicedMold.slice_shadow_volume(
+                shadow_volume=shadow_volume,
+                part_surface=part_surface,
+                layer_height=LAYER_HEIGHT,
+                nozzle_diameter=LAYER_WIDTH,
+                infill_percentage=INFILL_PERCENTAGE,
+                plane_z=PLANE_Z,
+            )
+            if VIS_MOLD_LAYERS is not None:
+                mold_layer_indices = resolve_layer_selection(
+                    VIS_MOLD_LAYERS, len(mold_layers), "mold"
+                )
 
     # 4. Exports
     if EXPORT_FIBERS:
@@ -503,8 +442,8 @@ def main() -> None:
     if EXPORT_PLASTIC:
         export_plastic(pieces, piece_paths, PLASTIC_OUT)
 
-    if GENERATE_MOLD and EXPORT_MOLD:
-        export_mold(model, PLASTIC_OUT)
+    if mold_layers and EXPORT_MOLD:
+        export_mold(mold_layers, PLASTIC_OUT)
 
     # 5. Visualization
     plotter = pv.Plotter(title="Whole print: mold + layers + fibers")
