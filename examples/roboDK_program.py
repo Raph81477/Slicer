@@ -903,20 +903,36 @@ def main(argv=None):
             tool.setParent(robot)
             print(f"Tool: attached station tool {tool.Name()!r} to the robot")
         else:
-            tool = RDK.AddTool(None, "Printhead", robot)
+            tool = robot.AddTool(robomath.eye(4), "Printhead")
             print("Tool: no tool in the station, created neutral tool 'Printhead' "
                   "(adjust its TCP in RoboDK)")
 
     # The single printhead has TWO outlets, each with its own calibrated
-    # TCP: create (or reuse) the two TCP items in the station, attached to
-    # the printhead, and pick the active one per program. Poses built with
-    # Z = nozzle axis are directly valid in the phase's TCP frame.
-    def ensure_tcp(name, xyzabc, base_tool=tool):
+    # TCP. Create (or reuse) the two TCP tools in the station and pick the
+    # active one per program. Poses built with Z = nozzle axis are
+    # directly valid in the phase's TCP frame.
+    def ensure_tcp(name, xyzabc, robot=robot):
+        """Return the station tool `name`, creating it with the given
+        [X, Y, Z, r, p, w] TCP pose if it does not exist yet."""
         item = RDK.Item(name, robolink.ITEM_TYPE_TOOL)
         if item.Valid():
-            item.setParent(base_tool)
-        else:
-            item = RDK.AddTool(robomath.xyzrpw_2_pose(xyzabc), name, base_tool)
+            return item
+        pose = robomath.xyzrpw_2_pose(xyzabc)
+        # RoboDK API: AddTool is a method of the ROBOT item (robodk >= 5),
+        # defined with respect to the robot flange. Older/some builds expose
+        # it on the Robolink instead; try both, then fall back to a generic
+        # empty tool whose TCP is set afterwards.
+        try:
+            item = robot.AddTool(pose, name)
+        except AttributeError:
+            try:
+                item = RDK.AddTool(pose, name)
+            except AttributeError:
+                item = RDK.Item(name, robolink.ITEM_TYPE_TOOL)
+                if not item.Valid():
+                    item = RDK.AddFrame(name)
+                item.setPoseTool(pose)
+        item.setParent(robot)
         return item
 
     tcp_tp = ensure_tcp(TOOL_TCP_NAME_TP, TOOL_TCP_TP)
