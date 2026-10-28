@@ -413,10 +413,10 @@ class SlicerApp(ttk.Frame):
             ).grid(row=i, column=2, sticky="e", padx=4)
         ttk.Checkbutton(
             f, text="boundary_edges (open borders)", variable=v["boundary_edges"]
-        ).grid(row=1, column=0, sticky="w", padx=4)
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
         ttk.Checkbutton(
             f, text="non_manifold_edges (non-manifold edges)", variable=v["non_manifold_edges"]
-        ).grid(row=1, column=1, sticky="w", padx=4)
+        ).grid(row=2, column=2, sticky="w", padx=4)
 
         info = ttk.Label(
             tab,
@@ -1123,7 +1123,10 @@ class SlicerApp(ttk.Frame):
                 first = False
 
         if params["vis_legend"]:
-            plotter.add_legend()
+            try:
+                plotter.add_legend()
+            except ValueError:
+                pass
 
         plotter.show()
 
