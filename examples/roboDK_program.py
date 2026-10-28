@@ -690,12 +690,11 @@ def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYERS):
     {layer: [files]} in layer order."""
     layers = find_fiber_layers(fiber_dir)
     available = sorted(layers)
+    layer = resolve_layer_arg(layer)
     if layer == "first":
         wanted = [available[0]]
-    elif layer == "all":
-        wanted = available
     else:
-        wanted = sorted(int(l) for l in layer)
+        wanted = layer
     missing = [l for l in wanted if l not in layers]
     if missing:
         raise SystemExit(f"Fiber layers {missing} not found (available: {available})")
@@ -1066,16 +1065,31 @@ def main(argv=None):
               f"(tool: {tool.Name()}).")
 
 
-def plastic_layers(args):
-    """Resolve the plastic layer selection: 'first', 'all', a number, or a
-    comma-separated list of numbers (e.g. '0,1,2')."""
-    sel = args.plastic_layers
-    if sel in ("first", "all"):
+def resolve_layer_arg(sel):
+    """Resolve a layer selection, whatever its type: 'first'/'all' (kept
+    as-is), an int, a real Python list/tuple of ints (PLASTIC_LAYERS =
+    [0, 1] in the file), or a comma-separated string ('0,1,2' from the
+    command line)."""
+    if isinstance(sel, str) and sel in ("first", "all"):
         return sel
+    if isinstance(sel, int):
+        return [sel]
+    if isinstance(sel, (list, tuple, set, np.ndarray)):
+        return sorted(int(l) for l in sel)
+    # string: single number or comma-separated list
     try:
-        return [int(x) for x in str(sel).split(",")]
+        return [int(str(sel).strip())]
     except ValueError:
-        return [int(sel)]
+        pass
+    try:
+        return [int(x) for x in str(sel).replace("[", "").replace("]", "").split(",")]
+    except ValueError as e:
+        raise SystemExit(f"Invalid layer selection: {sel!r} ({e})")
+
+
+def plastic_layers(args):
+    """Resolve the plastic layer selection (see resolve_layer_arg)."""
+    return resolve_layer_arg(args.plastic_layers)
 
 
 def parse_args(argv=None):
