@@ -81,6 +81,20 @@ TOOL_TCP_CF = [355.390, 32.270, 175.35, 0.0, 0.0, 0.0]    # carbon fiber outlet
 # (X, Y, Z, A, B, C — KRL convention: A = Rz, B = Ry, C = Rx, order ZYX)
 TOOL_TCP_NAME_TP = "TCP_TP"         # station item names
 TOOL_TCP_NAME_CF = "TCP_CF"
+
+# --- Nozzle axis per outlet (x/y/z) ---
+# The two calibrated TCP frames are not oriented the same way: the axis that
+# physically carries the nozzle can differ between the outlets. The pose is
+# built with the RoboDK convention (Z = nozzle axis), then REMAPPED onto
+# the requested TCP axis so the nozzle points along the right vector of
+# the outlet's frame:
+#   "z": no remap (the TCP's Z is the nozzle axis)
+#   "x": (X, Y, Z)_tcp = (Z, -Y, X)_built  (nozzle along the TCP +X)
+#   "y": (X, Y, Z)_tcp = (-X, Z, Y)_built (nozzle along the TCP +Y)
+# Same convention as the historical TOOL_AXIS (u/v/w) option.
+TOOL_AXIS_PLASTIC = "z"        # thermoplastic outlet (mold + piece layers)
+TOOL_AXIS_FIBER = "z"          # carbon fiber outlet
+
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
@@ -283,6 +297,34 @@ def resolve_data_file(path, extra_bases=()):
 
 
 # ----------------------- geometry helpers -----------------------
+def remap_nozzle_axis(T, axis):
+    """Remap a pose built with the RoboDK convention (Z = nozzle axis)
+    onto the TCP axis that physically carries the nozzle in the outlet's
+    frame (TOOL_AXIS_PLASTIC / TOOL_AXIS_FIBER, "x", "y" or "z").
+
+    Same convention as the historical TOOL_AXIS (u/v/w) option. The built
+    TCP Z points along the nozzle; remapping carries that +Z_built on the
+    configured TCP axis and stays right-handed:
+      "z": identity
+      "x": (X, Y, Z)_tcp = (Z, -Y, X)_built
+      "y": (X, Y, Z)_tcp = (-X, Z, Y)_built
+    Works on a single 4x4 pose or a list of poses."""
+    if axis == "z":
+        return T
+    if axis not in ("x", "y"):
+        raise ValueError(f"TOOL_AXIS must be 'x', 'y' or 'z', got {axis!r}")
+    single = np.ndim(T) == 2
+    T = np.asarray(T, dtype=float)
+    if single:
+        T = T[None, :, :]
+    X, Y, Z = T[:, :3, 0].copy(), T[:, :3, 1].copy(), T[:, :3, 2].copy()
+    if axis == "x":
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = Z, -Y, X
+    else:
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = -X, Z, Y
+    return T[0] if single else T
+
+
 def frames_from_z(P, Z, ref):
     """4x4 matrices: given Z, X = projection of ref onto the plane normal to Z."""
     Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
@@ -886,6 +928,14 @@ def main(argv=None):
         raise SystemExit("Nothing to print: no mold, no plastic layer and no "
                           "fiber layer selected")
     sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
+
+    # Remap the poses onto the nozzle axis of each outlet's TCP frame: the
+    # two calibrated TCP frames are not oriented the same way, so the axis
+    # carrying the nozzle can differ between the outlets.
+    for name, kind, section_moves in sections:
+        axis = TOOL_AXIS_FIBER if kind == "fiber" else TOOL_AXIS_PLASTIC
+        for mv in section_moves:
+            mv.pose = remap_nozzle_axis(mv.pose, axis)
 
 
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
