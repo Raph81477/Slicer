@@ -876,8 +876,14 @@ def main(argv=None):
             piece_layer_groups.append((li, []))
         piece_layer_groups[-1][1].append(mv)
 
-    fiber_lines_map = {}     # (for the trace drawing)
     if INTERLEAVE_TP_CF:
+        if not piece_layer_groups:
+            # No plastic layer selected (e.g. PLASTIC_LAYERS = []): the
+            # interleave has no TP layer to attach the fibers to, so the
+            # fiber layers are emitted on their own, in order.
+            for fli in sorted(fiber_section_moves):
+                sections.append((f"PrintCarbonLayer{fli}", "fiber",
+                                  fiber_section_moves[fli]))
         # Alternate: TP layer 0, CF layer 1, TP layer 1, CF layer 2, ...
         fiber_iters = iter(sorted(fiber_section_moves))
         for gi, (li, layer_moves) in enumerate(piece_layer_groups):
@@ -912,6 +918,9 @@ def main(argv=None):
                               fiber_section_moves[fli]))
 
     # termination: heaters off etc., emitted after the last program's last move
+    if not sections:
+        raise SystemExit("Nothing to print: no mold, no plastic layer and no "
+                          "fiber layer selected")
     sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
 
     # Remap the poses onto the nozzle axis of each phase's station tool:
