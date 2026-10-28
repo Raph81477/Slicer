@@ -484,12 +484,23 @@ def load_plastic(plastic_dir, layers=PLASTIC_LAYERS, prefix="plastic ", lift=LIF
         N_l.append(N)
         T_l.append(T)
         L_l.append(np.full(len(P), li))
-    P = np.vstack(P_l)
-    N = np.vstack(N_l)
-    T = np.concatenate(T_l)
-    layers_arr = np.concatenate(L_l)
+    if not P_l:
+        # Empty layer selection (PLASTIC_LAYERS = [] skips the plastic
+        # entirely): an empty path instead of a numpy concatenation error.
+        print(f"{prefix.capitalize()}: empty layer selection, no plastic loaded")
+        P = np.zeros((0, 3))
+        N = np.zeros((0, 3))
+        T = np.array([], dtype=object)
+        layers_arr = np.array([], dtype=int)
+    else:
+        P = np.vstack(P_l)
+        N = np.vstack(N_l)
+        T = np.concatenate(T_l)
+        layers_arr = np.concatenate(L_l)
     if len(P) == 0:
-        raise SystemExit(f"No points in {plastic_dir}")
+        print(f"{prefix.capitalize()}: no plastic points to print")
+        return PlasticPath(points=P, types=T, layers=layers_arr,
+                           normals=N, source=str(plastic_dir))
 
     # Degenerate normals (zero length) -> copy from a valid neighbour.
     nbad = 0
@@ -558,6 +569,10 @@ def plastic_moves(p: PlasticPath, prefix="plastic "):
     valid right-handed frame at every point."""
     P = p.points
     n = len(P)
+    if n == 0:
+        # Empty path (e.g. empty plastic layer selection): no moves.
+        print(f"{prefix.capitalize()}: empty path, no moves")
+        return [], []
     vertical = VERTICAL_TOOL if prefix.startswith("mold") else PIECE_VERTICAL_TOOL
     if vertical or p.normals is None:
         Z = np.tile([0.0, 0.0, float(VERTICAL_SIGN)], (n, 1))
