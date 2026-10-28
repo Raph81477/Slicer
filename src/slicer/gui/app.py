@@ -664,22 +664,14 @@ class SlicerApp(ttk.Frame):
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _fiber_surface_normals(
-        model, fiber_paths: dict[int, np.ndarray],
-    ) -> dict[int, np.ndarray]:
-        """Local surface normal of the part at every fiber point (unit cell
-        normal of the closest triangle of the part's outer surface), so the
-        exported transformed fibers carry real normals and the tool
-        orientation rebuilt from them follows the surface."""
-        part_surface = SlicedMold._outer_surface(model)
-        part_normals = SlicedMold._unit_cell_normals(part_surface)
-
-        normals = {}
-        for i, path in fiber_paths.items():
-            pts = np.asarray(path, dtype=float)
-            cell_ids = np.atleast_1d(part_surface.find_closest_cell(pts))
-            normals[i] = part_normals[cell_ids]
-        return normals
+    def _transform_normals(normals, R) -> dict[int, np.ndarray]:
+        """Apply the rotation (no translation: a normal is a direction) to
+        every fiber surface normal array."""
+        transformed = {}
+        for i, n in normals.items():
+            n = np.atleast_2d(np.asarray(n, dtype=float))
+            transformed[i] = (R @ n.T).T if R is not None else n
+        return transformed
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -750,19 +742,20 @@ class SlicerApp(ttk.Frame):
         # directory for the slicing.
         fiber_source_dir = fiber_dir
         if mold_generation:
-            fiber_paths = SlicedPiece.load_fiber_paths(fiber_dir, layer=1)
+            fiber_paths, fiber_normals = SlicedPiece.load_fiber_paths_with_normals(
+                fiber_dir, layer=1
+            )
             transformed_dir.mkdir(parents=True, exist_ok=True)
 
-            # Real local surface normals for every fiber point (unit cell
-            # normal of the closest triangle of the part's outer surface):
-            # the RoboDK program rebuilds the tool orientation from these
-            # normals, so they must follow the surface — a zero/constant
-            # normal would freeze the head orientation along the fibers.
+            # Initial surface normals from the raw fiber CSVs, rotated by
+            # the same rotation matrix as the points: the RoboDK program
+            # rebuilds the tool orientation from these normals, so they
+            # must follow the surface along the fibers.
             transformed_paths = {
                 k: SlicerApp._transform_points(p, R, lift_offset)
                 for k, p in fiber_paths.items()
             }
-            normals = SlicerApp._fiber_surface_normals(model, transformed_paths)
+            normals = SlicerApp._transform_normals(fiber_normals, R)
 
             SlicedPiece.save_fiber_paths(
                 transformed_paths,

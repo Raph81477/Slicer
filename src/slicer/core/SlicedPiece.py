@@ -72,6 +72,37 @@ class SlicedPiece(SlicedObject):
         return fiber_paths
 
     @staticmethod
+    def load_fiber_paths_with_normals(
+        directory: Path, layer: int = 1
+    ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+        """
+        Load the fiber paths of a given layer together with their surface
+        normals, as (fiber_paths, normals): the points are the first three
+        columns (x, y, z) and the normals the last three (nx, ny, nz) of
+        the same "layer_<layer>" CSV files as load_fiber_paths.
+
+        Fibers whose CSV has fewer than 6 columns get zero normals.
+        """
+        directory = Path(directory)
+        layer_dir = directory / f"layer_{layer}"
+        if not layer_dir.is_dir() and (directory / "fibers").is_dir():
+            layer_dir = directory / "fibers" / f"layer_{layer}"
+
+        fiber_paths = {}
+        normals = {}
+
+        for i, csv_file in enumerate(sorted(layer_dir.glob(f"fiber_{layer}_*.csv")), start=1):
+            with open(csv_file, mode="r", encoding="utf-8", newline="") as file:
+                raw_path = np.array(list(csv.reader(file)), dtype=float)
+
+            fiber_paths[i] = raw_path[:, :3]
+            normals[i] = raw_path[:, 3:6] if raw_path.shape[1] >= 6 else np.zeros_like(
+                fiber_paths[i]
+            )
+
+        return fiber_paths, normals
+
+    @staticmethod
     def save_fiber_paths(
         fiber_paths: dict[int, np.ndarray],
         directory: Path,

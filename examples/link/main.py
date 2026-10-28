@@ -48,6 +48,7 @@ MEAN_DIRECTION_MODE = "dimensions"                # "fibers" or "dimensions"
 APPROACH_DISTANCE = 1.0                       # approach/leave length [mm]
 MAX_CONNECTION_LENGTH = 2.0                  # above this: leave + approach [mm]
 SIMPLIFY_TOLERANCE = 0.5                     # RDP downsampling tolerance [mm] (0 disables)
+MERGE_TOLERANCE = 0.1                        # coincident-point merging tolerance [mm] (0 disables)
 
 # --- Edge detection (surface boundary used for the contours) ----------
 FEATURE_ANGLE = 30.0                          # angle between adjacent faces [deg]
@@ -173,6 +174,19 @@ def transform_fiber_paths(
     return transformed
 
 
+def transform_fiber_normals(
+    normals: dict[int, np.ndarray],
+    rot_mat: np.ndarray,
+) -> dict[int, np.ndarray]:
+    """Rotate the fiber surface normals with the same rotation matrix as
+    the fiber paths (a translation does not affect a normal)."""
+    transformed = {}
+    for key, normal in normals.items():
+        n = np.atleast_2d(np.asarray(normal, dtype=float))
+        transformed[key] = (rot_mat @ n.T).T
+    return transformed
+
+
 def slice_piece_paths(pieces: list[SlicedPiece]):
     """Build + downsample every layer's printing path, exactly as the GUI
     pipeline does. Returns piece_paths: one (segments, types) per layer."""
@@ -191,6 +205,7 @@ def slice_piece_paths(pieces: list[SlicedPiece]):
             approach_distance=APPROACH_DISTANCE,
             max_connection_length=MAX_CONNECTION_LENGTH,
             contour_isovalues=contour_isovalues,
+            merge_tolerance=MERGE_TOLERANCE,
             layer_width=LAYER_WIDTH,
         )
 
@@ -305,6 +320,32 @@ def load_transformed_fiber_layers(
     return layers
 
 
+def load_transformed_fiber_layers_with_normals(
+    rot_mat: np.ndarray,
+    lift_offset: float,
+) -> tuple[dict[int, dict[int, np.ndarray]], dict[int, dict[int, np.ndarray]]]:
+    """Load every fiber layer (paths + initial surface normals) and apply
+    the same rigid transform as the model to both: the paths get the
+    rotation then the lift, the normals only the rotation."""
+    fiber_root = DIR / "fibers"
+
+    layer_dirs = sorted(
+        (d for d in fiber_root.glob("layer_*") if d.is_dir()),
+        key=lambda d: int(d.name.split("_")[-1]),
+    )
+
+    layers = {}
+    normals = {}
+    for layer_dir in layer_dirs:
+        layer = int(layer_dir.name.split("_")[-1])
+        raw_paths, raw_normals = SlicedPiece.load_fiber_paths_with_normals(
+            fiber_root.parent, layer=layer
+        )
+        layers[layer] = transform_fiber_paths(raw_paths, rot_mat, lift_offset)
+        normals[layer] = transform_fiber_normals(raw_normals, rot_mat)
+    return layers, normals
+
+
 def export_fibers(
     model,
     rot_mat: np.ndarray,
@@ -314,31 +355,22 @@ def export_fibers(
     """Export the (rotated + lifted) fiber paths to CSV files, in the same
     format as the oamc export (x, y, z, nx, ny, nz).
 
-    The normal of every fiber point is the local surface normal of the
-    part at that point (unit cell normal of the closest triangle of the
-    part's outer surface), so the tool orientation rebuilt from it
-    actually follows the surface along the fiber. A constant fallback
-    normal would freeze the head orientation during the fiber printing."""
-    layers = load_transformed_fiber_layers(rot_mat, lift_offset)
-
-    # Part outer surface + its unit cell normals, computed once
-    part_surface = SlicedMold._outer_surface(model)
-    part_normals = SlicedMold._unit_cell_normals(part_surface)
+    The normal of every fiber point is the initial surface normal of the
+    raw oamc fiber CSV, rotated by the same rotation matrix as the paths:
+    the tool orientation rebuilt from it keeps following the surface along
+    the fiber."""
+    layers, rotated_normals = load_transformed_fiber_layers_with_normals(
+        rot_mat, lift_offset
+    )
 
     written = []
     for layer, fiber_paths in layers.items():
-        normals = {}
-        for i, path in fiber_paths.items():
-            pts = np.asarray(path, dtype=float)
-            cell_ids = np.atleast_1d(part_surface.find_closest_cell(pts))
-            normals[i] = part_normals[cell_ids]
-
         written.extend(
             SlicedPiece.save_fiber_paths(
                 fiber_paths,
                 out_directory,
                 layer=layer,
-                normals=normals,
+                normals=rotated_normals[layer],
             )
         )
 
@@ -404,6 +436,15 @@ def main() -> None:
     fiber_paths = SlicedPiece.load_fiber_paths(DIR, layer=1)
     fiber_paths = transform_fiber_paths(fiber_paths, rot_mat, lift_offset)
     pieces = SlicedPiece.slice_model(model, fiber_paths=fiber_paths)
+
+    # Merge coincident points of every layer surface right after the
+    # isosurface extraction, so that the plot, the exports and the path
+    # computation all see the same merged geometry (duplicated boundary
+    # points otherwise break the edge detection). build_printing_path
+    # re-merges internally, a no-op after this point.
+    if MERGE_TOLERANCE:
+        for piece in pieces:
+            piece.surface = piece.surface.merge_points(tolerance=MERGE_TOLERANCE)
 
     # Layer selections (piece + mold), resolved once
     piece_layer_indices = (
