@@ -46,10 +46,10 @@ PIECE_DIR = "plastic_layers"         # plastic piece: printed after the mold,
 MOLD_FILE = "mold_path.txt"         # optional: printed first if present
 PRINT_MOLD = True                   # False: skip the mold even if present
 
-PLASTIC_LAYERS = "all"             # "first" = first layer found; "all" = every layer in
-                                    # order; or a list of layer numbers, e.g. [0, 1]
-FIBER_LAYERS = "all"               # "all" = every fiber layer, interleaved with the
-                                    # plastic layers; "first" = smallest i only; or a list
+PLASTIC_LAYERS = None             # None or "all" = every layer; "first" = first layer only;
+                                    # an int; or a list of layers, e.g. [0, 1]
+FIBER_LAYERS = None               # None or "all" = every fiber layer, interleaved with the
+                                    # plastic layers; "first" = smallest i only; an int; or a list
 
 # --- Interleaving ---
 # One program per layer, alternating plastic (TP) and carbon fiber (CF):
@@ -467,19 +467,11 @@ def load_plastic(plastic_dir, layers=PLASTIC_LAYERS, prefix="plastic ", lift=LIF
     """Load the plastic piece trajectory from the per-layer CSV export
     ('x,y,z,nx,ny,nz,type,layer', one layer_<i>.csv file per layer, see
     SlicedPiece.export_layers_to_csv) and keep the requested layers.
-    layers: 'first', 'all', or a list of layer numbers."""
+    layers: None/'all' = every layer, 'first', an int, or a list of layer
+    numbers (see resolve_layer_arg)."""
     layer_files = find_plastic_layers(plastic_dir)
     available = sorted(layer_files)
-
-    if layers == "first":
-        wanted = [available[0]]
-    elif layers == "all":
-        wanted = available
-    else:
-        wanted = sorted(int(l) for l in layers)
-    missing = [l for l in wanted if l not in layer_files]
-    if missing:
-        raise SystemExit(f"Plastic layers {missing} not found (available: {available})")
+    wanted = resolve_layer_arg(layers, available)
 
     # Concatenate the requested layer files, in order
     P_l, N_l, T_l, L_l = [], [], [], []
@@ -498,19 +490,6 @@ def load_plastic(plastic_dir, layers=PLASTIC_LAYERS, prefix="plastic ", lift=LIF
     layers_arr = np.concatenate(L_l)
     if len(P) == 0:
         raise SystemExit(f"No points in {plastic_dir}")
-
-    available = sorted(int(l) for l in np.unique(layers_arr))
-    if layers == "first":
-        wanted = [available[0]]
-    elif layers == "all":
-        wanted = available
-    else:
-        wanted = sorted(int(l) for l in layers)
-    missing = [l for l in wanted if l not in available]
-    if missing:
-        raise SystemExit(f"Plastic layers {missing} not found (available: {available})")
-    sel = np.isin(layers_arr, wanted)
-    P, N, T, layers_arr = P[sel], N[sel], T[sel], layers_arr[sel]
 
     # Degenerate normals (zero length) -> copy from a valid neighbour.
     nbad = 0
@@ -686,18 +665,12 @@ def find_fiber_layers(fiber_dir=FIBERS_DIR):
 
 
 def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYERS):
-    """Resolve the fiber layer selection ('first', 'all' or a list) into
+    """Resolve the fiber layer selection (None/'all' = every layer,
+    'first', an int, or a list — see resolve_layer_arg) into
     {layer: [files]} in layer order."""
     layers = find_fiber_layers(fiber_dir)
     available = sorted(layers)
-    layer = resolve_layer_arg(layer)
-    if layer == "first":
-        wanted = [available[0]]
-    else:
-        wanted = layer
-    missing = [l for l in wanted if l not in layers]
-    if missing:
-        raise SystemExit(f"Fiber layers {missing} not found (available: {available})")
+    wanted = resolve_layer_arg(layer, available)
     result = {}
     for li in wanted:
         files = []
@@ -827,7 +800,9 @@ def main(argv=None):
         else:
             print(f"Mold skipped: file {mold_file} not found")
 
-    plastic = load_plastic(plastic_dir, plastic_layers(args), lift=args.lift_travel)
+    available_plastic = sorted(find_plastic_layers(plastic_dir))
+    plastic = load_plastic(plastic_dir, plastic_layers(args, available_plastic),
+                            lift=args.lift_travel)
     moves, plastic_runs = plastic_moves(plastic)
 
     # Orientation diagnostics: mean exported normal vs the nozzle axis of
@@ -1065,31 +1040,47 @@ def main(argv=None):
               f"(tool: {tool.Name()}).")
 
 
-def resolve_layer_arg(sel):
-    """Resolve a layer selection, whatever its type: 'first'/'all' (kept
-    as-is), an int, a real Python list/tuple of ints (PLASTIC_LAYERS =
-    [0, 1] in the file), or a comma-separated string ('0,1,2' from the
-    command line)."""
-    if isinstance(sel, str) and sel in ("first", "all"):
-        return sel
+def resolve_layer_arg(sel, available):
+    """Resolve a layer selection into an explicit, sorted list of layer
+    indices, whatever the input type:
+
+    - None or 'all': every available layer
+    - 'first': the smallest available layer
+    - int: that layer only
+    - list/tuple/set/ndarray of ints: those layers, sorted (PLASTIC_LAYERS
+      = [0, 1] in the file)
+    - string: single number ('2') or comma-separated ('0,1,2', from the
+      command line; '[0, 1]' also accepted)
+
+    Unknown layers raise a clean error listing what is available."""
+    if sel is None or (isinstance(sel, str) and sel == "all"):
+        return list(available)
+    if isinstance(sel, str) and sel == "first":
+        if not available:
+            raise SystemExit("No layer available for selection 'first'")
+        return [min(available)]
     if isinstance(sel, int):
-        return [sel]
-    if isinstance(sel, (list, tuple, set, np.ndarray)):
-        return sorted(int(l) for l in sel)
-    # string: single number or comma-separated list
-    try:
-        return [int(str(sel).strip())]
-    except ValueError:
-        pass
-    try:
-        return [int(x) for x in str(sel).replace("[", "").replace("]", "").split(",")]
-    except ValueError as e:
-        raise SystemExit(f"Invalid layer selection: {sel!r} ({e})")
+        wanted = [sel]
+    elif isinstance(sel, (list, tuple, set, np.ndarray)):
+        wanted = sorted(int(l) for l in sel)
+    else:
+        # string: single number or comma-separated list
+        try:
+            wanted = [int(str(sel).strip())]
+        except ValueError:
+            try:
+                wanted = [int(x) for x in str(sel).replace("[", "").replace("]", "").split(",")]
+            except ValueError as e:
+                raise SystemExit(f"Invalid layer selection: {sel!r} ({e})")
+    missing = [l for l in wanted if l not in set(available)]
+    if missing:
+        raise SystemExit(f"Layers {missing} not found (available: {sorted(available)})")
+    return wanted
 
 
-def plastic_layers(args):
+def plastic_layers(args, available):
     """Resolve the plastic layer selection (see resolve_layer_arg)."""
-    return resolve_layer_arg(args.plastic_layers)
+    return resolve_layer_arg(args.plastic_layers, available)
 
 
 def parse_args(argv=None):
@@ -1099,9 +1090,9 @@ def parse_args(argv=None):
     parser.add_argument("--fibers", default=FIBERS_DIR,
                         help="folder holding layer_<i>/fiber_<i>_<j>.csv (fibers)")
     parser.add_argument("--plastic-layers", default=PLASTIC_LAYERS,
-                        help="'first', 'all', a layer number, or '0,1,2'")
+                        help="None/'all' = every layer, 'first', a number, or '0,1,2'")
     parser.add_argument("--fiber-layers", default=FIBER_LAYERS,
-                        help="'first', 'all', a fiber layer number, or '0,1,2'")
+                        help="None/'all' = every layer, 'first', a number, or '0,1,2'")
     parser.add_argument("--mold", default=MOLD_FILE,
                         help="mold txt file (empty = skip the mold)")
     # Boolean options: each one is a module constant by default, flipped
