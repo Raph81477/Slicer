@@ -305,24 +305,33 @@ def load_transformed_fiber_layers(
 
 
 def export_fibers(
+    model,
     rot_mat: np.ndarray,
     lift_offset: float,
     out_directory: Path,
 ) -> list[Path]:
     """Export the (rotated + lifted) fiber paths to CSV files, in the same
-    format as the oamc export (x, y, z, nx, ny, nz)."""
+    format as the oamc export (x, y, z, nx, ny, nz).
+
+    The normal of every fiber point is the local surface normal of the
+    part at that point (unit cell normal of the closest triangle of the
+    part's outer surface), so the tool orientation rebuilt from it
+    actually follows the surface along the fiber. A constant fallback
+    normal would freeze the head orientation during the fiber printing."""
     layers = load_transformed_fiber_layers(rot_mat, lift_offset)
+
+    # Part outer surface + its unit cell normals, computed once
+    part_surface = SlicedMold._outer_surface(model)
+    part_normals = SlicedMold._unit_cell_normals(part_surface)
 
     written = []
     for layer, fiber_paths in layers.items():
-        normals = {
-            i: (rot_mat @ np.column_stack([
-                np.zeros(len(path)),
-                np.zeros(len(path)),
-                -np.ones(len(path)),
-            ]).T).T
-            for i, path in fiber_paths.items()
-        }
+        normals = {}
+        for i, path in fiber_paths.items():
+            pts = np.asarray(path, dtype=float)
+            cell_ids = np.atleast_1d(part_surface.find_closest_cell(pts))
+            normals[i] = part_normals[cell_ids]
+
         written.extend(
             SlicedPiece.save_fiber_paths(
                 fiber_paths,
@@ -437,7 +446,7 @@ def main() -> None:
 
     # 4. Exports
     if EXPORT_FIBERS:
-        export_fibers(rot_mat, lift_offset, FIBERS_OUT)
+        export_fibers(model, rot_mat, lift_offset, FIBERS_OUT)
 
     if EXPORT_PLASTIC:
         export_plastic(pieces, piece_paths, PLASTIC_OUT)
