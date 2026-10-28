@@ -513,7 +513,10 @@ def main() -> None:
         fiber_layers = load_transformed_fiber_layers(rot_mat, lift_offset)
         add_fibers(plotter, fiber_layers)
 
-    plotter.add_legend()
+    try:
+        plotter.add_legend()
+    except ValueError:
+        pass
     plotter.show()
 
 

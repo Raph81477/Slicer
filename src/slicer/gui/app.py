@@ -1123,7 +1123,10 @@ class SlicerApp(ttk.Frame):
                 first = False
 
         if params["vis_legend"]:
-            plotter.add_legend()
+            try:
+                plotter.add_legend()
+            except ValueError:
+                pass
 
         plotter.show()
 
