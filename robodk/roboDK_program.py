@@ -40,15 +40,15 @@ import numpy as np
 # folder. Data folders are resolved at runtime (see resolve_data_dir):
 # the value as given, then next to the open RoboDK station
 # (PATH_OPENSTATION), then the current directory.
-FIBERS_DIR = "output/fibers"
-PIECE_DIR = "output/thermoplastic"         # plastic piece: printed after the mold,
+FIBERS_DIR = "output/fibers_transformed/fibers"
+PIECE_DIR = "output/trajectories"         # plastic piece: printed after the mold,
                                     # one layer_<i>.csv file per layer
 MOLD_FILE = "output/thermoplastic/mold_path.txt"         # optional: printed first if present
 PRINT_MOLD = False                   # False: skip the mold even if present
 
-PLASTIC_LAYERS = []             # None or "all" = every layer; "first" = first layer only;
+PLASTIC_LAYERS = [0]             # None or "all" = every layer; "first" = first layer only;
                                     # an int; or a list of layers, e.g. [0, 1]
-FIBER_LAYERS = [1]               # None or "all" = every fiber layer, interleaved with the
+FIBER_LAYERS = []               # None or "all" = every fiber layer, interleaved with the
                                     # plastic layers; "first" = smallest i only; an int; or a list
 
 # --- Interleaving ---
@@ -61,7 +61,7 @@ INTERLEAVE_TP_CF = False             # False: all plastic layers, then all fiber
 # --- Base / tools (KRL reference values) ---
 FRAME_NAME = "PieceFrame"
 # Part frame, ABSOLUTE in the station, as [X, Y, Z, Rx, Ry, Rz] (XYZRPY).
-FRAME_XYZRPY = [1715.360, -62.923, 855.139, 0.000, 0.000, -90.000]
+FRAME_XYZRPY = [1715.360, -62.923, 855.139, 0.000, 0.000, 0.000]
 #Debugging frame
 #FRAME_XYZRPY = [800, 0, 0, 0.000, 0.000, -90.000]
 # Real reference base (HORST KRL), kept as a comment for the exported .src:

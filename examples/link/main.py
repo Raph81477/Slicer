@@ -48,7 +48,7 @@ MEAN_DIRECTION_MODE = "dimensions"                # "fibers" or "dimensions"
 APPROACH_DISTANCE = 1.0                       # approach/leave length [mm]
 MAX_CONNECTION_LENGTH = 2.0                  # above this: leave + approach [mm]
 SIMPLIFY_TOLERANCE = 0.5                     # RDP downsampling tolerance [mm] (0 disables)
-MERGE_TOLERANCE = 0.1                        # coincident-point merging tolerance [mm] (0 disables)
+MERGE_TOLERANCE = 0.01                        # coincident-point merging tolerance [mm] (0 disables)
 
 # --- Edge detection (surface boundary used for the contours) ----------
 FEATURE_ANGLE = 30.0                          # angle between adjacent faces [deg]
