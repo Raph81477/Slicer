@@ -804,7 +804,19 @@ def main(argv=None):
         raise SystemExit("No robot picked")
     tool = robot.getLink(robolink.ITEM_TYPE_TOOL)
     if not tool.Valid():
-        raise SystemExit("No tool attached to the robot: attach the printhead in RoboDK")
+        # No tool attached to the robot: look for any tool in the station
+        # (a station tool that is not linked to the robot), and attach the
+        # first one found; as a last resort create a neutral tool (TCP at
+        # the flange, Z along the nozzle by convention).
+        tools = RDK.ItemList(robolink.ITEM_TYPE_TOOL, False)
+        if tools:
+            tool = tools[0]
+            tool.setParent(robot)
+            print(f"Tool: attached station tool {tool.Name()!r} to the robot")
+        else:
+            tool = RDK.AddTool(None, "Printhead", robot)
+            print("Tool: no tool in the station, created neutral tool 'Printhead' "
+                  "(adjust its TCP in RoboDK)")
 
     frame = RDK.Item(FRAME_NAME, robolink.ITEM_TYPE_FRAME)
     if not frame.Valid():
