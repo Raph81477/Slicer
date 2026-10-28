@@ -664,6 +664,25 @@ class SlicerApp(ttk.Frame):
 
     # ------------------------------------------------------------------
     @staticmethod
+    def _fiber_surface_normals(
+        model, fiber_paths: dict[int, np.ndarray],
+    ) -> dict[int, np.ndarray]:
+        """Local surface normal of the part at every fiber point (unit cell
+        normal of the closest triangle of the part's outer surface), so the
+        exported transformed fibers carry real normals and the tool
+        orientation rebuilt from them follows the surface."""
+        part_surface = SlicedMold._outer_surface(model)
+        part_normals = SlicedMold._unit_cell_normals(part_surface)
+
+        normals = {}
+        for i, path in fiber_paths.items():
+            pts = np.asarray(path, dtype=float)
+            cell_ids = np.atleast_1d(part_surface.find_closest_cell(pts))
+            normals[i] = part_normals[cell_ids]
+        return normals
+
+    # ------------------------------------------------------------------
+    @staticmethod
     def _do_slicing(params: dict) -> dict:
         from oamc.core import CompositeMaterial, CompositeModel
         from oamc.enums import AngleUnit
@@ -733,11 +752,23 @@ class SlicerApp(ttk.Frame):
         if mold_generation:
             fiber_paths = SlicedPiece.load_fiber_paths(fiber_dir, layer=1)
             transformed_dir.mkdir(parents=True, exist_ok=True)
+
+            # Real local surface normals for every fiber point (unit cell
+            # normal of the closest triangle of the part's outer surface):
+            # the RoboDK program rebuilds the tool orientation from these
+            # normals, so they must follow the surface — a zero/constant
+            # normal would freeze the head orientation along the fibers.
+            transformed_paths = {
+                k: SlicerApp._transform_points(p, R, lift_offset)
+                for k, p in fiber_paths.items()
+            }
+            normals = SlicerApp._fiber_surface_normals(model, transformed_paths)
+
             SlicedPiece.save_fiber_paths(
-                {k: SlicerApp._transform_points(p, R, lift_offset)
-                 for k, p in fiber_paths.items()},
+                transformed_paths,
                 transformed_dir,
                 layer=1,
+                normals=normals,
             )
             fiber_source_dir = transformed_dir
 
