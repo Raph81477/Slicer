@@ -607,9 +607,18 @@ class SlicedPiece(SlicedObject):
         **build_kwargs,
     ) -> None:
         """
-        Export the plastic printing paths of every layer, one directory
-        per layer: <directory>/layer_i/segment_j.csv, mirroring the fiber
-        layout saved by oamc's save_fibers (fibers/layer_i/fiber_i_j.csv).
+        Export the plastic printing paths of every layer, ONE CSV FILE
+        PER LAYER: <directory>/layer_<i>.csv, each holding all the segments
+        of that layer back to back (the segment boundaries stay
+        distinguishable through the type column), with the columns
+
+            x, y, z, nx, ny, nz, type, layer
+
+        where (nx, ny, nz) is the local surface normal at that point, `type`
+        the segment type (curve, connection, approach, leave) and `layer`
+        the layer index. No tool axes are exported: the full orientation is
+        rebuilt on the receiving end (e.g. by the RoboDK program),
+        exactly like the txt export.
 
         layer_width sets the infill slicing plane spacing (one bead width).
 
@@ -618,21 +627,12 @@ class SlicedPiece(SlicedObject):
         (segments, types) of each layer, in layer order — no path is
         rebuilt and no simplification is applied here. When omitted, the
         paths are rebuilt from the pieces with build_printing_path at FULL
-        resolution.
-
-        Each CSV file holds one continuous path segment (curve, approach,
-        leave or connection) with the columns
-
-            x, y, z, nx, ny, nz, type
-
-        where (nx, ny, nz) is the local surface normal at that point and
-        `type` is the segment type. No tool axes are exported: the full
-        orientation is rebuilt on the receiving end (e.g. by the RoboDK
-        program), exactly like the txt export. No downsampling happens
-        here: downsample beforehand (analyze_and_downsample_path) so what
-        is written is exactly what has been visualized.
+        resolution. No downsampling happens here: downsample beforehand
+        (analyze_and_downsample_path) so what is written is exactly what
+        has been visualized.
         """
         directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
 
         for i, piece in enumerate(pieces):
             if piece_paths is not None:
@@ -652,26 +652,22 @@ class SlicedPiece(SlicedObject):
 
             normals = piece.compute_path_normals(segments) if include_normal else None
 
-            layer_dir = directory / f"layer_{i}"
-            layer_dir.mkdir(parents=True, exist_ok=True)
+            path = directory / f"layer_{i}.csv"
+            with open(path, mode="w", encoding="utf-8", newline="") as f:
+                f.write("x,y,z,nx,ny,nz,type,layer\n")
+                for j, (seg, seg_type) in enumerate(zip(segments, types)):
+                    seg = np.asarray(seg, dtype=float)
+                    if len(seg) == 0:
+                        continue
 
-            for j, (seg, seg_type) in enumerate(zip(segments, types), start=1):
-                seg = np.asarray(seg, dtype=float)
-                if len(seg) == 0:
-                    continue
+                    if normals is not None:
+                        n = np.asarray(normals[j], dtype=float).reshape(len(seg), 3)
+                        data = np.hstack([seg, n])
+                    else:
+                        data = seg
 
-                if normals is not None:
-                    n = np.asarray(normals[j - 1], dtype=float).reshape(len(seg), 3)
-                    data = np.hstack([seg, n])
-                else:
-                    data = seg
-
-                path = layer_dir / f"segment_{j}.csv"
-                with open(path, mode="w", encoding="utf-8", newline="") as f:
                     for row in data:
-                        coords = ",".join(f"{v:.5f}" for v in row[:3])
-                        if normals is not None:
-                            coords += "," + ",".join(f"{v:.5f}" for v in row[3:])
-                        f.write(f"{coords},{seg_type}\n")
+                        cols = ",".join(f"{v:.5f}" for v in row)
+                        f.write(f"{cols},{seg_type},{i}\n")
 
         print(f"Piece path exported to {directory} ({len(pieces)} layers)")
