@@ -960,7 +960,19 @@ class SlicedMold(SlicedObject):
             layer_surface = layer_surface.compute_implicit_distance(part_tri, inplace=False)
             d_part = np.abs(layer_surface["implicit_distance"])
             d_plane = np.full(layer_surface.n_points, z_layer - plane_z)   # constant sur une couche
+            # dist_to_part drives the contour shells: they hug both the part
+            # and the printing plane (min with the layer altitude).
             layer_surface["dist_to_part"] = np.minimum(d_part, d_plane)
+            # The infill zone is clipped on the distance to the PART ONLY:
+            # using dist_to_part here would forbid the infill until
+            # q * layer_height > n_contour_shells * nozzle_diameter (the
+            # altitude cap dominates on the first layers), leaving the
+            # bottom of the mold hollow. The printing plane is assumed
+            # smooth enough that no shell/infill adaptation is needed
+            # against it, and the part is lifted so that its zmin is a
+            # multiple of the layer height, so its lowest areas coincide
+            # with the grid.
+            layer_surface["dist_to_part_raw"] = d_part
 
             # 4. Contour shells: isolines of dist_to_part on this layer
             contour_shells = []
@@ -973,12 +985,10 @@ class SlicedMold(SlicedObject):
                     stripped = iso.strip(join=True)
                     contour_shells.extend(cls.order_segments(stripped))
 
-            # 5. Inner zone: clip the layer beyond the shells.
-            # PyVista's clip_scalar convention is easy to get backwards:
-            # invert=True keeps values BELOW value. To keep dist > inner_offset
-            # (the actual inner zone, past the contour shells), invert must be False.
+            # 5. Inner zone: clip the layer beyond the shells, on the
+            # distance to the part alone (see dist_to_part_raw above).
             inner_zone = layer_surface.clip_scalar(
-                scalars="dist_to_part",
+                scalars="dist_to_part_raw",
                 value=inner_offset,
                 invert=False  # keep dist > inner_offset
             )
