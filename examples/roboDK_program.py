@@ -98,6 +98,21 @@ FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its proj
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
+# --- Nozzle axis per printhead (u/v/w) ---
+# The two printheads' TCP frames are NOT oriented the same way: the axis
+# that physically carries the nozzle differs between the station tools.
+# After the pose is built with the RoboDK convention (Z = nozzle axis), it
+# is REMAPPED onto the requested TCP axis so the nozzle actually points
+# along the chosen axis of the station tool's frame:
+#   "z": no remap (station tool has its nozzle along its Z)
+#   "x": TCP frame becomes (Z', Y', X') = (Z, -Y, X) of the built pose
+#         (nozzle along the tool's +X, tool Z keeps the built X)
+#   "y": TCP frame becomes (X', Y', Z') = (-X, Z, Y) of the built pose
+#         (nozzle along the tool's +Y, tool Z keeps the built Y)
+# Same convention as the historical TOOL_AXIS option (u/v/w = TCP X/Y/Z).
+TOOL_AXIS_PLASTIC = "z"        # thermoplastic head (mold + piece layers)
+TOOL_AXIS_FIBER = "z"          # composite/fiber head
+
 # --- Plastic ---
 MIN_STEP = 0.05                     # mm: minimum distance between two kept points
 DETOUR_Z_TOL = 0.2                  # mm: curve/connection point below print height - tol -> 'leave'
@@ -276,6 +291,34 @@ def resolve_data_file(path, extra_bases=()):
 
 
 # ----------------------- geometry helpers -----------------------
+def remap_nozzle_axis(T, axis):
+    """Remap a pose built with the RoboDK convention (Z = nozzle axis)
+    onto the TCP axis that physically carries the nozzle in the station
+    tool frame (TOOL_AXIS_PLASTIC / TOOL_AXIS_FIBER, "x", "y" or "z").
+
+    Same convention as the historical TOOL_AXIS (u/v/w) option. The built
+    TCP Z points along the nozzle; remapping carries that +Z_built on the
+    configured TCP axis and stays right-handed:
+      "z": identity
+      "x": (X, Y, Z)_tcp = (Z, -Y, X)_built
+      "y": (X, Y, Z)_tcp = (-X, Z, Y)_built
+    Works on a single 4x4 pose or a list of poses."""
+    if axis == "z":
+        return T
+    if axis not in ("x", "y"):
+        raise ValueError(f"TOOL_AXIS must be 'x', 'y' or 'z', got {axis!r}")
+    single = np.ndim(T) == 2
+    T = np.asarray(T, dtype=float)
+    if single:
+        T = T[None, :, :]
+    X, Y, Z = T[:, :3, 0].copy(), T[:, :3, 1].copy(), T[:, :3, 2].copy()
+    if axis == "x":
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = Z, -Y, X
+    else:
+        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = -X, Z, Y
+    return T[0] if single else T
+
+
 def frames_from_z(P, Z, ref):
     """4x4 matrices: given Z, X = projection of ref onto the plane normal to Z."""
     Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
@@ -881,6 +924,14 @@ def main(argv=None):
 
     # termination: heaters off etc., emitted after the last program's last move
     sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
+
+    # Remap the poses onto the nozzle axis of each phase's station tool:
+    # the two printhead TCP frames are not oriented the same way, so the
+    # axis carrying the nozzle can differ between the tools.
+    for name, kind, section_moves in sections:
+        axis = TOOL_AXIS_FIBER if kind == "fiber" else TOOL_AXIS_PLASTIC
+        for mv in section_moves:
+            mv.pose = remap_nozzle_axis(mv.pose, axis)
 
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
