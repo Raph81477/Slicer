@@ -116,7 +116,7 @@ PIECE_TOOL_SIGN = +1          # piece: tool Z = PIECE_TOOL_SIGN * local surface 
                                #    PIECE_TOOL_SIGN = +1 - flip here if the tool looks
                                #    reversed in the station)
                                # +1: TCP Z points out of the surface
-FIXED_X = [1, 0, 0]            # reference vector (part frame): TCP X = its projection on the
+FIXED_X = [-1, 0, 0]            # reference vector (part frame): TCP X = its projection on the
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = +1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
