@@ -40,15 +40,15 @@ import numpy as np
 # folder. Data folders are resolved at runtime (see resolve_data_dir):
 # the value as given, then next to the open RoboDK station
 # (PATH_OPENSTATION), then the current directory.
-FIBERS_DIR = "fibers_transformed"
-PIECE_DIR = "plastic_layers"         # plastic piece: printed after the mold,
+FIBERS_DIR = "output/fibers"
+PIECE_DIR = "output/thermoplastic"         # plastic piece: printed after the mold,
                                     # one layer_<i>.csv file per layer
-MOLD_FILE = "mold_path.txt"         # optional: printed first if present
-PRINT_MOLD = True                   # False: skip the mold even if present
+MOLD_FILE = "output/thermoplastic/mold_path.txt"         # optional: printed first if present
+PRINT_MOLD = False                   # False: skip the mold even if present
 
-PLASTIC_LAYERS = None             # None or "all" = every layer; "first" = first layer only;
+PLASTIC_LAYERS = []             # None or "all" = every layer; "first" = first layer only;
                                     # an int; or a list of layers, e.g. [0, 1]
-FIBER_LAYERS = None               # None or "all" = every fiber layer, interleaved with the
+FIBER_LAYERS = [1]               # None or "all" = every fiber layer, interleaved with the
                                     # plastic layers; "first" = smallest i only; an int; or a list
 
 # --- Interleaving ---
@@ -56,12 +56,14 @@ FIBER_LAYERS = None               # None or "all" = every fiber layer, interleav
 # plastic layer 0, fiber layer 1, plastic layer 1, fiber layer 2, ... The
 # mold (if printed) is its own program first. Each program re-declares the
 # active base ($BASE) and the tool ($TOOL) of its phase.
-INTERLEAVE_TP_CF = True             # False: all plastic layers, then all fiber layers
+INTERLEAVE_TP_CF = False             # False: all plastic layers, then all fiber layers
 
 # --- Base / tools (KRL reference values) ---
 FRAME_NAME = "PieceFrame"
 # Part frame, ABSOLUTE in the station, as [X, Y, Z, Rx, Ry, Rz] (XYZRPY).
 FRAME_XYZRPY = [1715.360, -62.923, 855.139, 0.000, 0.000, -90.000]
+#Debugging frame
+#FRAME_XYZRPY = [800, 0, 0, 0.000, 0.000, -90.000]
 # Real reference base (HORST KRL), kept as a comment for the exported .src:
 #   $BASE = {FRAME: X 1715.360,Y -92.923,Z 870.139,A 0.000,B 0.000,C -90.000}
 
@@ -93,18 +95,18 @@ TOOL_TCP_NAME_CF = "TCP_CF"
 #   "y": (X, Y, Z)_tcp = (-X, Z, Y)_built (nozzle along the TCP +Y)
 # Same convention as the historical TOOL_AXIS (u/v/w) option.
 TOOL_AXIS_PLASTIC = "z"        # thermoplastic outlet (mold + piece layers)
-TOOL_AXIS_FIBER = "z"          # carbon fiber outlet
+TOOL_AXIS_FIBER = "x"          # carbon fiber outlet
 
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
-VERTICAL_TOOL = True           # MOLD: ignore the normal columns, the nozzle stays normal
+VERTICAL_TOOL = False           # MOLD: ignore the normal columns, the nozzle stays normal
                                # to the z=0 plane (the mold is quasi-flat)
 PIECE_VERTICAL_TOOL = False   # PIECE (plastic txt): False = orientation rebuilt from the
                                # normal (5-axis); True = vertical nozzle like the mold
 VERTICAL_SIGN = -1             # (vertical mode) -1: TCP Z towards -Z of the part frame (nozzle
                                # down); +1: up
-PIECE_TOOL_SIGN = -1          # piece: tool Z = PIECE_TOOL_SIGN * local surface normal.
+PIECE_TOOL_SIGN = +1          # piece: tool Z = PIECE_TOOL_SIGN * local surface normal.
                                # Successor of the old TOOL_AXIS/TOOL_SIGN pair: the export no
                                # longer carries tool axes, the nozzle axis IS the normal.
                                # -1: TCP Z points into the surface (nozzle against the part);
@@ -114,9 +116,9 @@ PIECE_TOOL_SIGN = -1          # piece: tool Z = PIECE_TOOL_SIGN * local surface 
                                #    PIECE_TOOL_SIGN = +1 - flip here if the tool looks
                                #    reversed in the station)
                                # +1: TCP Z points out of the surface
-FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its projection on the
+FIXED_X = [1, 0, 0]            # reference vector (part frame): TCP X = its projection on the
                                # plane perpendicular to Z (constant rotation about the nozzle)
-FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
+FIBER_TOOL_SIGN = +1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
 
 # --- Plastic ---
