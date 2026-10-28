@@ -71,10 +71,16 @@ FRAME_XYZRPY = [1715.360, -62.923, 855.139, 0.000, 0.000, -90.000]
 # Real TCP values (HORST KRL):
 #   thermoplastic: $TOOL = {FRAME: X 350.510,Y -43.90,Z 173.7900,A 0.000,B 90.000,C 0.000}
 #   carbon fiber: $TOOL = {FRAME: X 355.390,Y 32.270,Z 175.35000,A 0.000,B 0.000,C 0.000}
-PLASTIC_TOOL_NAME = ""              # station tool for the thermoplastic printhead
-                                    # ("" = the tool currently attached to the robot)
-FIBER_TOOL_NAME = ""               # station tool for the composite/fiber printhead
-                                    # ("" = same tool as the plastic, no tool change)
+# The printhead is a SINGLE physical tool with TWO outlets (thermoplastic
+# and carbon fiber), each with its own calibrated TCP. The program creates
+# (or reuses) both TCPs in the station from the real robot KRL values and
+# switches the active TCP per program (setPoseTool): the poses are then
+# expressed in the TCP of the phase's outlet, no axis remap needed.
+TOOL_TCP_TP = [350.510, -43.90, 173.79, 0.0, 90.0, 0.0]   # thermoplastic outlet
+TOOL_TCP_CF = [355.390, 32.270, 175.35, 0.0, 0.0, 0.0]    # carbon fiber outlet
+# (X, Y, Z, A, B, C — KRL convention: A = Rz, B = Ry, C = Rx, order ZYX)
+TOOL_TCP_NAME_TP = "TCP_TP"         # station item names
+TOOL_TCP_NAME_CF = "TCP_CF"
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
@@ -98,20 +104,6 @@ FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its proj
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
-# --- Nozzle axis per printhead (u/v/w) ---
-# The two printheads' TCP frames are NOT oriented the same way: the axis
-# that physically carries the nozzle differs between the station tools.
-# After the pose is built with the RoboDK convention (Z = nozzle axis), it
-# is REMAPPED onto the requested TCP axis so the nozzle actually points
-# along the chosen axis of the station tool's frame:
-#   "z": no remap (station tool has its nozzle along its Z)
-#   "x": TCP frame becomes (Z', Y', X') = (Z, -Y, X) of the built pose
-#         (nozzle along the tool's +X, tool Z keeps the built X)
-#   "y": TCP frame becomes (X', Y', Z') = (-X, Z, Y) of the built pose
-#         (nozzle along the tool's +Y, tool Z keeps the built Y)
-# Same convention as the historical TOOL_AXIS option (u/v/w = TCP X/Y/Z).
-TOOL_AXIS_PLASTIC = "z"        # thermoplastic head (mold + piece layers)
-TOOL_AXIS_FIBER = "z"          # composite/fiber head
 
 # --- Plastic ---
 MIN_STEP = 0.05                     # mm: minimum distance between two kept points
@@ -291,34 +283,6 @@ def resolve_data_file(path, extra_bases=()):
 
 
 # ----------------------- geometry helpers -----------------------
-def remap_nozzle_axis(T, axis):
-    """Remap a pose built with the RoboDK convention (Z = nozzle axis)
-    onto the TCP axis that physically carries the nozzle in the station
-    tool frame (TOOL_AXIS_PLASTIC / TOOL_AXIS_FIBER, "x", "y" or "z").
-
-    Same convention as the historical TOOL_AXIS (u/v/w) option. The built
-    TCP Z points along the nozzle; remapping carries that +Z_built on the
-    configured TCP axis and stays right-handed:
-      "z": identity
-      "x": (X, Y, Z)_tcp = (Z, -Y, X)_built
-      "y": (X, Y, Z)_tcp = (-X, Z, Y)_built
-    Works on a single 4x4 pose or a list of poses."""
-    if axis == "z":
-        return T
-    if axis not in ("x", "y"):
-        raise ValueError(f"TOOL_AXIS must be 'x', 'y' or 'z', got {axis!r}")
-    single = np.ndim(T) == 2
-    T = np.asarray(T, dtype=float)
-    if single:
-        T = T[None, :, :]
-    X, Y, Z = T[:, :3, 0].copy(), T[:, :3, 1].copy(), T[:, :3, 2].copy()
-    if axis == "x":
-        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = Z, -Y, X
-    else:
-        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = -X, Z, Y
-    return T[0] if single else T
-
-
 def frames_from_z(P, Z, ref):
     """4x4 matrices: given Z, X = projection of ref onto the plane normal to Z."""
     Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
@@ -923,13 +887,6 @@ def main(argv=None):
                           "fiber layer selected")
     sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
 
-    # Remap the poses onto the nozzle axis of each phase's station tool:
-    # the two printhead TCP frames are not oriented the same way, so the
-    # axis carrying the nozzle can differ between the tools.
-    for name, kind, section_moves in sections:
-        axis = TOOL_AXIS_FIBER if kind == "fiber" else TOOL_AXIS_PLASTIC
-        for mv in section_moves:
-            mv.pose = remap_nozzle_axis(mv.pose, axis)
 
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
@@ -949,6 +906,23 @@ def main(argv=None):
             tool = RDK.AddTool(None, "Printhead", robot)
             print("Tool: no tool in the station, created neutral tool 'Printhead' "
                   "(adjust its TCP in RoboDK)")
+
+    # The single printhead has TWO outlets, each with its own calibrated
+    # TCP: create (or reuse) the two TCP items in the station, attached to
+    # the printhead, and pick the active one per program. Poses built with
+    # Z = nozzle axis are directly valid in the phase's TCP frame.
+    def ensure_tcp(name, xyzabc, base_tool=tool):
+        item = RDK.Item(name, robolink.ITEM_TYPE_TOOL)
+        if item.Valid():
+            item.setParent(base_tool)
+        else:
+            item = RDK.AddTool(robomath.xyzrpw_2_pose(xyzabc), name, base_tool)
+        return item
+
+    tcp_tp = ensure_tcp(TOOL_TCP_NAME_TP, TOOL_TCP_TP)
+    tcp_cf = ensure_tcp(TOOL_TCP_NAME_CF, TOOL_TCP_CF)
+    print(f"TCPs: {TOOL_TCP_NAME_TP} (TP outlet) and {TOOL_TCP_NAME_CF} (CF outlet) "
+          f"on tool {tool.Name()!r}")
 
     frame = RDK.Item(FRAME_NAME, robolink.ITEM_TYPE_FRAME)
     if not frame.Valid():
@@ -974,8 +948,9 @@ def main(argv=None):
     robot.setPoseTool(tool)
 
     if args.check_reach:
-        # Per section, with the single attached tool.
+        # Per section, with the phase's TCP (the IK depends on the active TCP).
         for name, kind, section_moves in sections:
+            robot.setPoseTool(tcp_cf if kind == "fiber" else tcp_tp)
             tested = list(range(0, len(section_moves), CHECK_STEP))
             bad = [k for k in tested
                    if len(robot.SolveIK(mat(section_moves[k].pose)).rows) < 6]
@@ -999,7 +974,7 @@ def main(argv=None):
     for si, (name, kind, section_moves) in enumerate(sections):
         prog = RDK.AddProgram(name)
         prog.setPoseFrame(frame)
-        prog.setPoseTool(tool)
+        prog.setPoseTool(tcp_cf if kind == "fiber" else tcp_tp)
 
         def emit(items, _prog=prog):
             for kind_, val in items:
@@ -1019,7 +994,8 @@ def main(argv=None):
         # Every program re-declares the active base and the TCP of its
         # phase, so the programs stay independent of each other (the KRL
         # $BASE / $TOOL values match the real robot frames).
-        emit([("comment", f"--- {name} (tool: {tool.Name()}) ---")])
+        phase_tcp = tcp_cf if kind == "fiber" else tcp_tp
+        emit([("comment", f"--- {name} (TCP: {phase_tcp.Name()}) ---")])
         emit([("comment", "Reference base (real robot KRL): "
                           "$BASE = {FRAME: X 1715.360,Y -92.923,Z 870.139,"
                           "A 0.000,B 0.000,C -90.000}")])
@@ -1061,7 +1037,7 @@ def main(argv=None):
         except Exception as e:
             print(f"prog.Update() unavailable for {name}:", e)
         print(f"Program '{name}' created: {len(section_moves)} moves "
-              f"(tool: {tool.Name()}).")
+              f"(TCP: {phase_tcp.Name()}).")
 
 
 def resolve_layer_arg(sel, available):
