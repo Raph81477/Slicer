@@ -46,12 +46,35 @@ PIECE_DIR = "plastic_layers"         # plastic piece: printed after the mold,
 MOLD_FILE = "mold_path.txt"         # optional: printed first if present
 PRINT_MOLD = True                   # False: skip the mold even if present
 
-PLASTIC_LAYERS = "first"           # "first" = first layer found; "all" = every layer in
+PLASTIC_LAYERS = "all"             # "first" = first layer found; "all" = every layer in
                                     # order; or a list of layer numbers, e.g. [0, 1]
-FIBER_LAYER = "first"               # "first" = smallest i in fibers_transformed/layer_i
+FIBER_LAYERS = "all"               # "all" = every fiber layer, interleaved with the
+                                    # plastic layers; "first" = smallest i only; or a list
 
+# --- Interleaving ---
+# One program per layer, alternating plastic (TP) and carbon fiber (CF):
+# plastic layer 0, fiber layer 1, plastic layer 1, fiber layer 2, ... The
+# mold (if printed) is its own program first. Each program re-declares the
+# active base ($BASE) and the tool ($TOOL) of its phase.
+INTERLEAVE_TP_CF = True             # False: all plastic layers, then all fiber layers
+
+# --- Base / tools (KRL reference values) ---
 FRAME_NAME = "PieceFrame"
-FRAME_XYZRPY = [800, 0, 0, 0, 0, 0]  # ABSOLUTE in the station -> TO ADJUST
+# Part frame, ABSOLUTE in the station, as [X, Y, Z, Rx, Ry, Rz] (XYZRPY).
+FRAME_XYZRPY = [1715.360, -62.923, 855.139, 0.000, 0.000, -90.000]
+# Real reference base (HORST KRL), kept as a comment for the exported .src:
+#   $BASE = {FRAME: X 1715.360,Y -92.923,Z 870.139,A 0.000,B 0.000,C -90.000}
+
+# Tools (TCP), one per printhead. The thermoplastic head (plastic tool)
+# prints the mold and the plastic layers; the composite head (fiber tool)
+# lays the carbon fiber. Each program re-declares its phase's tool.
+# Real TCP values (HORST KRL):
+#   thermoplastic: $TOOL = {FRAME: X 350.510,Y -43.90,Z 173.7900,A 0.000,B 90.000,C 0.000}
+#   carbon fiber: $TOOL = {FRAME: X 355.390,Y 32.270,Z 175.35000,A 0.000,B 0.000,C 0.000}
+PLASTIC_TOOL_NAME = ""              # station tool for the thermoplastic printhead
+                                    # ("" = the tool currently attached to the robot)
+FIBER_TOOL_NAME = ""               # station tool for the composite/fiber printhead
+                                    # ("" = same tool as the plastic, no tool change)
 FORCE_FRAME_POSE = True
 
 # --- Orientation ---
@@ -105,6 +128,14 @@ LIFT_Z = 10                         # mm: vertical lift after the mold/plastic, 
 # --- HORST KRL calls (per the HORST robotic printing API) ---
 TP_TEMP, CR_TEMP, CF_TEMP = 230, 205, 200
 # Initialization block (BAS): emitted as inserted code at the very start
+# $TOOL declarations per printhead, inserted at the start of every
+# program (matching the real robot KRL values; the RoboDK simulation uses
+# the station tool, these lines make the exported .src self-contained).
+TOOL_DECL_TP = ("$TOOL = {FRAME: X 350.510,Y -43.90,Z 173.7900,"
+                "A 0.000,B 90.000,C 0.000}")
+TOOL_DECL_CF = ("$TOOL = {FRAME: X 355.390,Y 32.270,Z 175.35000,"
+                "A 0.000,B 0.000,C 0.000}")
+
 INIT_BAS_CODE = [
     "BAS (#INITMOV,0)",
     "BAS (#VEL_PTP,100)",
@@ -599,7 +630,8 @@ def load_fiber(path):
     return P[keep], N[keep]
 
 
-def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYER):
+def find_fiber_layers(fiber_dir=FIBERS_DIR):
+    """List the available fiber layers: {layer_i: directory}."""
     layers = {}
     for p in glob.glob(os.path.join(fiber_dir, "layer_*")):
         m = re.fullmatch(r"layer_(\d+)", os.path.basename(p))
@@ -607,19 +639,37 @@ def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYER):
             layers[int(m.group(1))] = p
     if not layers:
         raise SystemExit(f"No layer_<i> folder in {fiber_dir}")
-    li = min(layers) if layer == "first" else int(layer)
-    if li not in layers:
-        raise SystemExit(f"Fiber layer {li} not found (available: {sorted(layers)})")
-    files = []
-    for p in glob.glob(os.path.join(layers[li], f"fiber_{li}_*.csv")):
-        m = re.fullmatch(rf"fiber_{li}_(\d+)\.csv", os.path.basename(p))
-        if m:
-            files.append((int(m.group(1)), p))
-    files.sort()
-    if not files:
-        raise SystemExit(f"No fiber_{li}_<j>.csv file in {layers[li]}")
-    print(f"Fibers: layer {li}, {len(files)} fibers")
-    return li, [p for _, p in files]
+    return layers
+
+
+def find_fiber_files(fiber_dir=FIBERS_DIR, layer=FIBER_LAYERS):
+    """Resolve the fiber layer selection ('first', 'all' or a list) into
+    {layer: [files]} in layer order."""
+    layers = find_fiber_layers(fiber_dir)
+    available = sorted(layers)
+    if layer == "first":
+        wanted = [available[0]]
+    elif layer == "all":
+        wanted = available
+    else:
+        wanted = sorted(int(l) for l in layer)
+    missing = [l for l in wanted if l not in layers]
+    if missing:
+        raise SystemExit(f"Fiber layers {missing} not found (available: {available})")
+    result = {}
+    for li in wanted:
+        files = []
+        for p in glob.glob(os.path.join(layers[li], f"fiber_{li}_*.csv")):
+            m = re.fullmatch(rf"fiber_{li}_(\d+)\.csv", os.path.basename(p))
+            if m:
+                files.append((int(m.group(1)), p))
+        files.sort()
+        if not files:
+            print(f"  warning: no fiber_{li}_<j>.csv file in {layers[li]}")
+            continue
+        result[li] = [p for _, p in files]
+        print(f"Fibers: layer {li}, {len(files)} fibers")
+    return result
 
 
 def fiber_moves(files, layer=None):
@@ -753,12 +803,27 @@ def main(argv=None):
               f"(dot with normal: {float(np.dot(nozzle, mean_n)):+.2f}, "
               f"expected {PIECE_TOOL_SIGN:+d})")
 
-    fiber_layer, files = find_fiber_files(fibers_dir, args.fiber_layer)
-    fmoves, fiber_lines = fiber_moves(files, layer=fiber_layer)
+    fiber_layers = find_fiber_files(fibers_dir, args.fiber_layers)
 
-    # Group the moves into per-layer programs. Each group keeps the tool of
-    # its phase (plastic printhead for the mold and the piece layers, fiber
-    # printhead for the fiber layer) and ends with a vertical lift, so the
+    # Build the fiber moves per layer: {layer: (moves, polylines)}
+    fiber_section_moves = {}
+    fiber_all_lines = []
+    for li in sorted(fiber_layers):
+        fmoves, fiber_lines = fiber_moves(fiber_layers[li], layer=li)
+        fiber_all_lines += fiber_lines
+        if fmoves:
+            lift = fmoves[-1].pose.copy()
+            lift[2, 3] += LIFT_Z
+            fmoves.append(Move(
+                pose=lift, speed=SPEED_TRAVEL, rounding=0,
+                pre=[("comment", f"fiber layer {li} done: lift")],
+                label=f"lift after fiber layer {li}"))
+            fiber_section_moves[li] = fmoves
+
+    # Group the moves into per-layer programs, alternating plastic (TP) and
+    # carbon fiber (CF): plastic layer 0, fiber layer 1, plastic layer 1,
+    # fiber layer 2, ... The mold (if printed) is its own program first.
+    # Each program re-declares the base and the tool of its phase, so the
     # programs can be run one after the other in the station.
     sections = []           # (name, tool_kind, moves)
 
@@ -771,30 +836,48 @@ def main(argv=None):
             label="lift after mold"))
         sections.append(("PrintMold", "plastic", mold_moves))
 
-    # piece: one program per layer, in trajectory order
-    piece_layers = []
+    # piece: one group per layer, in trajectory order
+    piece_layer_groups = []
     for mv in moves:
         li = mv.layer if mv.layer is not None else 0
-        if not piece_layers or piece_layers[-1][0] != li:
-            piece_layers.append((li, []))
-        piece_layers[-1][1].append(mv)
-    for li, layer_moves in piece_layers:
-        lift = layer_moves[-1].pose.copy()
-        lift[2, 3] += LIFT_Z
-        layer_moves.append(Move(
-            pose=lift, speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", f"layer {li} done: lift")],
-            label=f"lift after layer {li}"))
-        sections.append((f"PrintPlasticLayer{li}", "plastic", layer_moves))
+        if not piece_layer_groups or piece_layer_groups[-1][0] != li:
+            piece_layer_groups.append((li, []))
+        piece_layer_groups[-1][1].append(mv)
 
-    if fmoves:
-        lift = fmoves[-1].pose.copy()
-        lift[2, 3] += LIFT_Z
-        fmoves.append(Move(
-            pose=lift, speed=SPEED_TRAVEL, rounding=0,
-            pre=[("comment", "extruder change: plastic -> composite")],
-            label="lift before fibers"))
-        sections.append((f"PrintCarbonLayer{fiber_layer}", "fiber", fmoves))
+    fiber_lines_map = {}     # (for the trace drawing)
+    if INTERLEAVE_TP_CF:
+        # Alternate: TP layer 0, CF layer 1, TP layer 1, CF layer 2, ...
+        fiber_iters = iter(sorted(fiber_section_moves))
+        for gi, (li, layer_moves) in enumerate(piece_layer_groups):
+            lift = layer_moves[-1].pose.copy()
+            lift[2, 3] += LIFT_Z
+            layer_moves.append(Move(
+                pose=lift, speed=SPEED_TRAVEL, rounding=0,
+                pre=[("comment", f"layer {li} done: lift")],
+                label=f"lift after layer {li}"))
+            sections.append((f"PrintPlasticLayer{li}", "plastic", layer_moves))
+            # after every plastic layer except the last, the next fiber layer
+            if gi < len(piece_layer_groups) - 1:
+                try:
+                    fli = next(fiber_iters)
+                except StopIteration:
+                    continue
+                if fli in fiber_section_moves:
+                    sections.append((f"PrintCarbonLayer{fli}", "fiber",
+                                      fiber_section_moves[fli]))
+    else:
+        # Sequential: all the plastic layers, then all the fiber layers
+        for li, layer_moves in piece_layer_groups:
+            lift = layer_moves[-1].pose.copy()
+            lift[2, 3] += LIFT_Z
+            layer_moves.append(Move(
+                pose=lift, speed=SPEED_TRAVEL, rounding=0,
+                pre=[("comment", f"layer {li} done: lift")],
+                label=f"lift after layer {li}"))
+            sections.append((f"PrintPlasticLayer{li}", "plastic", layer_moves))
+        for fli in sorted(fiber_section_moves):
+            sections.append((f"PrintCarbonLayer{fli}", "fiber",
+                              fiber_section_moves[fli]))
 
     # termination: heaters off etc., emitted after the last program's last move
     sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
@@ -856,7 +939,7 @@ def main(argv=None):
     if args.draw_curves:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
         draw_curves(RDK, robolink, frame, plastic_runs, "PrintTrace", [1, 0, 0, 1])
-        draw_curves(RDK, robolink, frame, fiber_lines, "FiberTrace", [0, 0.3, 1, 1])
+        draw_curves(RDK, robolink, frame, fiber_all_lines, "FiberTrace", [0, 0.3, 1, 1])
 
     # Initialization (BAS block + printhead preparation) goes into the first
     # program only, before any movement.
@@ -883,7 +966,25 @@ def main(argv=None):
             emit([("code", c) for c in INIT_BAS_CODE])
             emit([("comment", "--- Printhead preparation ---")])
             emit([("code", c) for c in HEAD_INIT_CODE])
+
+        # Every program re-declares the active base and the TCP of its
+        # phase, so the programs stay independent of each other (the KRL
+        # $BASE / $TOOL values match the real robot frames).
         emit([("comment", f"--- {name} (tool: {tool.Name()}) ---")])
+        emit([("comment", "Reference base (real robot KRL): "
+                          "$BASE = {FRAME: X 1715.360,Y -92.923,Z 870.139,"
+                          "A 0.000,B 0.000,C -90.000}")])
+        emit([("code", "BAS (#BASE,0)")])
+        if kind == "fiber":
+            emit([("comment", "CF printhead TCP (real robot KRL): "
+                              "$TOOL = {FRAME: X 355.390,Y 32.270,Z 175.35000,"
+                              "A 0.000,B 0.000,C 0.000}")])
+            emit([("code", TOOL_DECL_CF)])
+        else:
+            emit([("comment", "TP printhead TCP (real robot KRL): "
+                              "$TOOL = {FRAME: X 350.510,Y -43.90,Z 173.7900,"
+                              "A 0.000,B 90.000,C 0.000}")])
+            emit([("code", TOOL_DECL_TP)])
 
         cur_speed = cur_round = None
         trace_on = None
@@ -934,8 +1035,8 @@ def parse_args(argv=None):
                         help="folder holding layer_<i>/fiber_<i>_<j>.csv (fibers)")
     parser.add_argument("--plastic-layers", default=PLASTIC_LAYERS,
                         help="'first', 'all', a layer number, or '0,1,2'")
-    parser.add_argument("--fiber-layer", default=FIBER_LAYER,
-                        help="'first' or a fiber layer number")
+    parser.add_argument("--fiber-layers", default=FIBER_LAYERS,
+                        help="'first', 'all', a fiber layer number, or '0,1,2'")
     parser.add_argument("--mold", default=MOLD_FILE,
                         help="mold txt file (empty = skip the mold)")
     # Boolean options: each one is a module constant by default, flipped
