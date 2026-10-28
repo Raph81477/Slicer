@@ -19,13 +19,9 @@ possible (TCP X = projection of a fixed reference vector, see FIXED_X),
 which avoids the tool spinning about its nozzle and the IK/simulation
 errors that come with it.
 
-Two different printheads are used: the thermoplastic one (mold + piece)
-and the composite/fiber one. They are two separate RoboDK tools whose TCP
-conventions differ (the X of one matches the Z of the other), so the poses
-are remapped per phase onto each tool's real nozzle axis
-(NOZZLE_TCP_AXIS_PLASTIC / NOZZLE_TCP_AXIS_FIBER) and the program emits a
-real tool change (setPoseTool) at the plastic -> fiber transition
-(PLASTIC_TOOL_NAME / FIBER_TOOL_NAME).
+A SINGLE RoboDK tool is used for everything (the tool attached to the
+robot): no tool change, no TCP axis remap. The station tool is expected to
+have its nozzle along its Z axis (RoboDK convention).
 """
 from __future__ import annotations
 
@@ -48,10 +44,6 @@ FIBERS_DIR = "fibers_transformed"
 PIECE_DIR = "plastic_layers"         # plastic piece: printed after the mold,
                                     # one layer_<i>.csv file per layer
 MOLD_FILE = "mold_path.txt"         # optional: printed first if present
-PLASTIC_TOOL_NAME = ""              # station tool for the thermoplastic printhead
-                                    # ("" = the tool currently attached to the robot)
-FIBER_TOOL_NAME = "Fiber Tool"      # station tool for the composite/fiber printhead
-                                    # ("" = same tool as the plastic, no tool change)
 PRINT_MOLD = True                   # False: skip the mold even if present
 
 PLASTIC_LAYERS = "first"           # "first" = first layer found; "all" = every layer in
@@ -82,27 +74,6 @@ PIECE_TOOL_SIGN = -1          # piece: tool Z = PIECE_TOOL_SIGN * local surface 
 FIXED_X = [0, 1, 0]            # reference vector (part frame): TCP X = its projection on the
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = -1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
-
-# --- Tool frame convention ---
-# TCP axis along which the nozzle actually points IN THE STATION TOOL
-# FRAME. The poses are built with the RoboDK convention (Z = approach
-# axis), then remapped onto this axis right before the program is emitted:
-#   "z" -> no remap (station tool already has Z along the nozzle)
-#   "x" -> the station tool has the nozzle along its X axis
-#   "y" -> the station tool has the nozzle along its Y axis
-# With NOZZLE_TCP_AXIS = "x", the frame (X, Y, Z)_built becomes the TCP
-# frame (Z', Y', X') = (-X, Y, Z): the built approach axis (-Z, towards the
-# part) is carried by the tool's +X, and the tool's Z keeps the "print
-# plane" direction (the built +X). Check in RoboDK: the nozzle must end
-# up perpendicular to the printed surface, pointing at it.
-#
-# The plastic printhead and the fiber printhead are two DIFFERENT RoboDK
-# tools, and their TCP conventions differ (the X of one matches the Z of
-# the other), so each phase gets its own setting:
-NOZZLE_TCP_AXIS_PLASTIC = "x"    # thermoplastic tool (mold + piece): nozzle axis
-NOZZLE_TCP_AXIS_FIBER = "z"     # composite/fiber tool: nozzle axis
-# Aliases for readability below.
-NOZZLE_TCP_AXIS = NOZZLE_TCP_AXIS_PLASTIC
 
 # --- Plastic ---
 MIN_STEP = 0.05                     # mm: minimum distance between two kept points
@@ -274,38 +245,6 @@ def resolve_data_file(path, extra_bases=()):
 
 
 # ----------------------- geometry helpers -----------------------
-def remap_nozzle_axis(T, axis=NOZZLE_TCP_AXIS):
-    """Remap a pose built with the RoboDK convention (Z = approach axis)
-    onto the TCP axis that actually carries the nozzle in the station
-    tool frame (NOZZLE_TCP_AXIS, set when the poses are emitted).
-
-    The built TCP Z already points INTO the surface (towards the part,
-    PIECE_TOOL_SIGN = -1), i.e. the nozzle axis IS the built +Z. Remapping
-    must (a) carry that +Z_built on the configured TCP axis and (b) stay
-    right-handed, so the other two axes are permuted (with the sign that
-    keeps det = +1):
-      "z": identity
-      "x": (X, Y, Z)_tcp = (Z, -Y, X)_built   (TCP X = nozzle axis,
-             TCP Z = built X, TCP Y flipped)
-      "y": (X, Y, Z)_tcp = (-X, Z, Y)_built   (TCP Y = nozzle axis,
-             TCP Z = built Y, TCP X flipped)
-    Works on a single 4x4 pose or a list of poses, in place."""
-    if axis == "z":
-        return T
-    if axis not in ("x", "y"):
-        raise ValueError(f"NOZZLE_TCP_AXIS must be 'x', 'y' or 'z', got {axis!r}")
-    single = np.ndim(T) == 2
-    T = np.asarray(T, dtype=float)
-    if single:
-        T = T[None, :, :]
-    X, Y, Z = T[:, :3, 0].copy(), T[:, :3, 1].copy(), T[:, :3, 2].copy()
-    if axis == "x":
-        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = Z, -Y, X
-    else:
-        T[:, :3, 0], T[:, :3, 1], T[:, :3, 2] = -X, Z, Y
-    return T[0] if single else T
-
-
 def frames_from_z(P, Z, ref):
     """4x4 matrices: given Z, X = projection of ref onto the plane normal to Z."""
     Z = Z / np.linalg.norm(Z, axis=1, keepdims=True)
@@ -800,12 +739,11 @@ def main(argv=None):
     moves, plastic_runs = plastic_moves(plastic)
 
     # Orientation diagnostics: mean exported normal vs the nozzle axis of
-    # the first piece move (before the NOZZLE_TCP_AXIS remap, the nozzle
-    # axis is the built TCP Z = PIECE_TOOL_SIGN * normal). If the tool axis
-    # looks wrong in the simulation, compare these two lines first: a sign
-    # convention mismatch shows up as dot(z_tcp, mean_normal) ~= +1 instead
-    # of -1 (fix: PIECE_TOOL_SIGN = +1), and an axis mismatch means the
-    # station tool's nozzle axis is not its Z (fix: NOZZLE_TCP_AXIS).
+    # the first piece move (the nozzle axis is the built TCP Z =
+    # PIECE_TOOL_SIGN * normal). If the tool axis looks wrong in the
+    # simulation, compare these two lines first: a sign convention
+    # mismatch shows up as dot(z_tcp, mean_normal) ~= +1 instead of -1
+    # (fix: PIECE_TOOL_SIGN = +1).
     if plastic.normals is not None and len(moves):
         mean_n = plastic.normals.mean(axis=0)
         mean_n = mean_n / np.linalg.norm(mean_n)
@@ -813,8 +751,7 @@ def main(argv=None):
         print(f"Orientation check: mean exported normal  = {np.round(mean_n, 3).tolist()}")
         print(f"Orientation check: built nozzle axis (Z)  = {np.round(nozzle, 3).tolist()} "
               f"(dot with normal: {float(np.dot(nozzle, mean_n)):+.2f}, "
-              f"expected {PIECE_TOOL_SIGN:+d}; remapped onto TCP "
-              f"{NOZZLE_TCP_AXIS.upper()})")
+              f"expected {PIECE_TOOL_SIGN:+d})")
 
     fiber_layer, files = find_fiber_files(fibers_dir, args.fiber_layer)
     fmoves, fiber_lines = fiber_moves(files, layer=fiber_layer)
@@ -862,32 +799,12 @@ def main(argv=None):
     # termination: heaters off etc., emitted after the last program's last move
     sections[-1][2][-1].post += [("code", c) for c in TERMINATION_CODE]
 
-    # The two printheads are different RoboDK tools with different TCP
-    # conventions (the X of one matches the Z of the other): remap the
-    # poses per section, onto the nozzle axis of the section's tool.
-    for name, kind, section_moves in sections:
-        axis = NOZZLE_TCP_AXIS_FIBER if kind == "fiber" else NOZZLE_TCP_AXIS_PLASTIC
-        for mv in section_moves:
-            mv.pose = remap_nozzle_axis(mv.pose, axis)
-
     robot = RDK.ItemUserPick("Pick the robot", robolink.ITEM_TYPE_ROBOT)
     if not robot.Valid():
         raise SystemExit("No robot picked")
     tool = robot.getLink(robolink.ITEM_TYPE_TOOL)
     if not tool.Valid():
         raise SystemExit("No tool attached to the robot: attach the printhead in RoboDK")
-
-    # Fiber printhead: a second station tool. When configured, the program
-    # emits a real tool change at the plastic -> fiber transition; the
-    # fiber moves are then expressed in this tool's TCP (whose convention
-    # differs from the plastic tool: NOZZLE_TCP_AXIS_FIBER).
-    fiber_tool = tool
-    if FIBER_TOOL_NAME:
-        fiber_tool = RDK.Item(FIBER_TOOL_NAME, robolink.ITEM_TYPE_TOOL)
-        if not fiber_tool.Valid():
-            raise SystemExit(
-                f"No tool named {FIBER_TOOL_NAME!r} in the station: "
-                "create it or clear FIBER_TOOL_NAME to keep the plastic tool")
 
     frame = RDK.Item(FRAME_NAME, robolink.ITEM_TYPE_FRAME)
     if not frame.Valid():
@@ -913,11 +830,8 @@ def main(argv=None):
     robot.setPoseTool(tool)
 
     if args.check_reach:
-        # Per section, with the section's tool attached (the IK depends on
-        # the active TCP).
+        # Per section, with the single attached tool.
         for name, kind, section_moves in sections:
-            section_tool = fiber_tool if kind == "fiber" else tool
-            robot.setPoseTool(section_tool)
             tested = list(range(0, len(section_moves), CHECK_STEP))
             bad = [k for k in tested
                    if len(robot.SolveIK(mat(section_moves[k].pose)).rows) < 6]
@@ -926,7 +840,6 @@ def main(argv=None):
                 p_abs = section_moves[k].pose[:3, 3] + np.array(frame.PoseAbs().Pos())
                 print(f"  move {k + 1}: {section_moves[k].label} "
                       f"-> absolute approx {np.round(p_abs, 1).tolist()}")
-        robot.setPoseTool(tool)
 
     if args.draw_curves:
         draw_curves(RDK, robolink, frame, mold_runs, "MoldTrace", [1, 0.6, 0, 1])
@@ -940,10 +853,9 @@ def main(argv=None):
         RDK.Command("Trace", "Reset")      # clear previous traces
 
     for si, (name, kind, section_moves) in enumerate(sections):
-        section_tool = fiber_tool if kind == "fiber" else tool
         prog = RDK.AddProgram(name)
         prog.setPoseFrame(frame)
-        prog.setPoseTool(section_tool)
+        prog.setPoseTool(tool)
 
         def emit(items, _prog=prog):
             for kind_, val in items:
@@ -959,7 +871,7 @@ def main(argv=None):
             emit([("code", c) for c in INIT_BAS_CODE])
             emit([("comment", "--- Printhead preparation ---")])
             emit([("code", c) for c in HEAD_INIT_CODE])
-        emit([("comment", f"--- {name} (tool: {section_tool.Name()}) ---")])
+        emit([("comment", f"--- {name} (tool: {tool.Name()}) ---")])
 
         cur_speed = cur_round = None
         trace_on = None
@@ -987,7 +899,7 @@ def main(argv=None):
         except Exception as e:
             print(f"prog.Update() unavailable for {name}:", e)
         print(f"Program '{name}' created: {len(section_moves)} moves "
-              f"(tool: {section_tool.Name()}).")
+              f"(tool: {tool.Name()}).")
 
 
 def plastic_layers(args):
