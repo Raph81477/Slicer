@@ -6,6 +6,7 @@ dependencies = [
     "pyvista",
     "numpy",
     "scipy",
+    "oamc",
     # "robodk",
 ]
 

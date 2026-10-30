@@ -42,7 +42,7 @@ N_LAYERS_UNDER_PIECE = 3                     # mold layers under the piece (lift
 LAYER_HEIGHT = 0.35                          # layer thickness [mm]
 LAYER_WIDTH = 0.70                           # bead width = nozzle diameter [mm]
 N_LAYERS_CONTOUR = 5                         # contour passes (width = N x LAYER_WIDTH)
-INFILL_ANGLE = 45.0                          # infill angle to the mean direction (0/45/90)
+INFILL_ANGLE = 45.0                         # infill angle to the mean direction (0/45/90)
 MEAN_DIRECTION_MODE = "dimensions"                # "fibers" or "dimensions"
 APPROACH_DISTANCE = 1.0                       # approach/leave length [mm]
 MAX_CONNECTION_LENGTH = 2.0                  # above this: leave + approach [mm]
@@ -52,18 +52,18 @@ MERGE_TOLERANCE = 0.1                        # coincident-point merging toleranc
 # --- Edge detection (surface boundary used for the contours) ----------
 FEATURE_ANGLE = 30.0                          # angle between adjacent faces [deg]
 BOUNDARY_EDGES = True                         # include open borders
-NON_MANIFOLD_EDGES = True                     # include non-manifold edges
+NON_MANIFOLD_EDGES = False                     # include non-manifold edges
 VIS_EDGES = False                             # show the detected edges (no path computation)
 
 # --- Mold -------------------------------------------------------------
-GENERATE_MOLD = True                         # build the shadow volume + slicing planes
+GENERATE_MOLD = False                         # build the shadow volume + slicing planes
 INFILL_PERCENTAGE = 5.0                      # mold infill [%]
 PLANE_Z = 0.0                                # printing plane altitude
 OFFSET_FACES = 0.05                          # ray origin offset [mm]
 
 # --- Visualization ----------------------------------------------------
 VIS_MOLD = GENERATE_MOLD                     # show the mold planes
-VIS_LAYERS = None                            # piece layers to display (None = all, int = first N,
+VIS_LAYERS = [1]                            # piece layers to display (None = all, int = first N,
                                              # list = explicit indices e.g. [0, 2, 5])
 VIS_LAYER_HEIGHT = 0.35                      # exaggerated spacing between plotted layers
 VIS_FIBERS = False                            # show the fiber paths

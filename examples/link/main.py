@@ -54,17 +54,17 @@ MERGE_TOLERANCE = 0.01                        # coincident-point merging toleran
 FEATURE_ANGLE = 30.0                          # angle between adjacent faces [deg]
 BOUNDARY_EDGES = True                         # include open borders
 NON_MANIFOLD_EDGES = False                     # include non-manifold edges
-VIS_EDGES = False                             # show the detected edges (no path computation)
+VIS_EDGES = True                             # show the detected edges (no path computation)
 
 # --- Mold -------------------------------------------------------------
-GENERATE_MOLD = True                         # build the shadow volume + slicing planes
+GENERATE_MOLD = False                         # build the shadow volume + slicing planes
 INFILL_PERCENTAGE = 5.0                      # mold infill [%]
 PLANE_Z = 0.0                                # printing plane altitude
 OFFSET_FACES = 0.05                          # ray origin offset [mm]
 
 # --- Visualization ----------------------------------------------------
 VIS_MOLD = GENERATE_MOLD                     # show the mold planes
-VIS_LAYERS = [0]                            # piece layers to display (None = all, int = first N,
+VIS_LAYERS = []                            # piece layers to display (None = all, int = first N,
                                              # list = explicit indices e.g. [0, 2, 5])
 VIS_LAYER_HEIGHT = 0.35                      # exaggerated spacing between plotted layers
 VIS_FIBERS = False                            # show the fiber paths

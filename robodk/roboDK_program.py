@@ -46,9 +46,9 @@ PIECE_DIR = "output/trajectories"         # plastic piece: printed after the mol
 MOLD_FILE = "output/thermoplastic/mold_path.txt"         # optional: printed first if present
 PRINT_MOLD = False                   # False: skip the mold even if present
 
-PLASTIC_LAYERS = [0]             # None or "all" = every layer; "first" = first layer only;
+PLASTIC_LAYERS = [1]             # None or "all" = every layer; "first" = first layer only;
                                     # an int; or a list of layers, e.g. [0, 1]
-FIBER_LAYERS = []               # None or "all" = every fiber layer, interleaved with the
+FIBER_LAYERS = [1]               # None or "all" = every fiber layer, interleaved with the
                                     # plastic layers; "first" = smallest i only; an int; or a list
 
 # --- Interleaving ---
@@ -61,7 +61,7 @@ INTERLEAVE_TP_CF = False             # False: all plastic layers, then all fiber
 # --- Base / tools (KRL reference values) ---
 FRAME_NAME = "PieceFrame"
 # Part frame, ABSOLUTE in the station, as [X, Y, Z, Rx, Ry, Rz] (XYZRPY).
-FRAME_XYZRPY = [1715.360, -62.923, 855.139, 0.000, 0.000, 0.000]
+FRAME_XYZRPY = [1615.360, -31.923, 870.139, 0.000, 0.000, 180.000]
 #Debugging frame
 #FRAME_XYZRPY = [800, 0, 0, 0.000, 0.000, -90.000]
 # Real reference base (HORST KRL), kept as a comment for the exported .src:
@@ -116,7 +116,7 @@ PIECE_TOOL_SIGN = +1          # piece: tool Z = PIECE_TOOL_SIGN * local surface 
                                #    PIECE_TOOL_SIGN = +1 - flip here if the tool looks
                                #    reversed in the station)
                                # +1: TCP Z points out of the surface
-FIXED_X = [-1, 0, 0]            # reference vector (part frame): TCP X = its projection on the
+FIXED_X = [1, 0, 0]            # reference vector (part frame): TCP X = its projection on the
                                # plane perpendicular to Z (constant rotation about the nozzle)
 FIBER_TOOL_SIGN = +1                # fibers: tool Z = FIBER_TOOL_SIGN * normal
 
@@ -164,8 +164,6 @@ INIT_BAS_CODE = [
     "BAS (#VEL_PTP,100)",
     "BAS (#ACC_PTP,20)",
     "$VEL.CP=0.04",
-    "BAS (#TOOL,0)",
-    "BAS (#BASE,0)",
 ]
 # Printhead preparation: init -> extend -> temp -> set_feed
 HEAD_INIT_CODE = [

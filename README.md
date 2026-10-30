@@ -1,65 +1,64 @@
-# Slicer non planaire (impression 3D composites, bras robotique 6 ddl)
+# Non-planar slicer (composite 3D printing, 6-DOF robotic arm)
 
-Slicing non planaire de modèles composites (fibres continues) pour
-l'impression avec un bras robotique à 6 degrés de liberté. La génération
-des trajectoires se fait en Python (PyVista / NumPy / SciPy) ; la
-simulation du robot se fait dans RoboDK.
+Non-planar slicing of composite models (continuous fibers) for printing
+with a 6-degree-of-freedom robotic arm. Trajectory generation is done in
+Python (PyVista / NumPy / SciPy); the robot simulation is done in
+RoboDK.
 
 ## Structure
 
-- `src/slicer/core/SlicedObject.py` — classe parente (surface d'une
-  couche, distance au bord, offset, contours, construction du path,
-  export des trajectoires).
-- `src/slicer/core/SlicedPiece.py` — classe héritée pour la pièce à
-  imprimer (fibres, plans de slicing alignés aux fibres, path
-  fiber-aligned + contours).
-- `src/slicer/core/SlicedMold.py` — classe héritée pour le moule
-  inférieur généré automatiquement (shadow volume, slicing, infill
-  zigzag, export).
-- `src/slicer/utils/visualization.py` — visualisation du moule par
-  plans de slicing (patches remplis, ear-clipping).
-- `src/slicer/gui/` — interface graphique Tkinter.
+- `src/slicer/core/SlicedObject.py` — parent class (layer surface,
+  distance to the edge, offset, contours, path construction, trajectory
+  export).
+- `src/slicer/core/SlicedPiece.py` — derived class for the piece to
+  print (fibers, fiber-aligned slicing planes, fiber-aligned path +
+  contours).
+- `src/slicer/core/SlicedMold.py` — derived class for the
+  automatically generated bottom mold (shadow volume, slicing, zigzag
+  infill, export).
+- `src/slicer/utils/visualization.py` — visualization of the mold by
+  slicing planes (filled patches, ear-clipping).
+- `src/slicer/gui/` — Tkinter graphical interface.
 
 ## GUI (Tkinter)
 
-Lancer l'interface :
+Launch the interface:
 
 ```bash
 python -m slicer.gui
 ```
 
-Fonctionnalités :
+Features:
 
-- Choix du fichier .dat (modèle ANSYS) et du dossier des fibres
-  (CSV exportés par OAMC).
-- Saisie manuelle de `layer_height` et `layer_width` (diamètre buse),
-  plus `fiber_diameter` et `n_layers_under_piece`.
-- Options « Rotate and lift model » et « Mold generation ». Activer le
-  mold active automatiquement le rotate and lift. Le lift place le
-  modèle tel que `zmin > 0`, puis l'augmente de
-  `n_layers_under_piece * layer_height`. Quand le mold est activé, on
-  peut choisir le dossier où les fibres transformées (rotation + lift)
-  sont enregistrées.
-- Paramètres tunables du path de la pièce : `contour_width`,
+- Selection of the .dat file (ANSYS model) and the fiber folder
+  (CSV files exported by OAMC).
+- Manual entry of `layer_height` and `layer_width` (nozzle diameter),
+  plus `fiber_diameter` and `n_layers_under_piece`.
+- "Rotate and lift model" and "Mold generation" options. Enabling the
+  mold automatically enables rotate and lift. The lift positions the
+  model such that `zmin > 0`, then raises it by
+  `n_layers_under_piece * layer_height`. When the mold is enabled, the
+  folder where the transformed fibers (rotation + lift) are saved can
+  be selected.
+- Tunable path parameters for the piece: `contour_width`,
   `approach_distance`, `max_connection_length`, `merge_tolerance`,
   `contour_isovalues`.
-- Paramètres tunables de l'extraction des edges (utilisée pour le
-  calcul des contours) : `feature_angle`, `boundary_edges`,
-  `non_manifold_edges`.
-- Paramètres du moule : méthode de shadow volume (vertical / cone /
-  simple), `infill_percentage`, `n_contour_shells`.
-- Visualisation dans une figure PyVista externe, avec options
-  séparées : modèle, edges détectés, path d'impression (courbes bleu,
-  connections rouge, approach vert, leave orange), mold (visualisation
-  par plans de slicing), légende, et sélection des couches à
-  afficher (ex. `0-4` ou `2,5,7`).
-- Matériaux (fibre transversement isotrope + matrice isotrope)
-  modifiables.
-- Export des trajectoires (pièce + moule) vers des fichiers texte
-  prêts pour RoboDK.
+- Tunable edge-extraction parameters (used for contour computation):
+  `feature_angle`, `boundary_edges`, `non_manifold_edges`.
+- Mold parameters: shadow volume method (vertical / cone / simple),
+  `infill_percentage`, `n_contour_shells`.
+- Visualization in an external PyVista figure, with separate options:
+  model, detected edges, print path (blue curves, red connections,
+  green approach, orange leave), mold (visualization by slicing
+  planes), legend, and selection of layers to display (e.g. `0-4` or
+  `2,5,7`).
+- Materials (transversely isotropic fiber + isotropic matrix)
+  editable.
+- Export of trajectories (piece + mold) to text files ready for
+  RoboDK.
 
-- Onglet « Fiber tuning » : pipeline OAMC complet de génération/optimisation
-  des fibres (charge de palier, mold optionnel, optimisation aux moindres
-  carrés avec itérations, load paths LPP, post-traitement RDP/outliers,
-  export des fibres et CSV de convergence), réutilisé du tuner OAMC
-  autonome, dans une page dédiée du slicer.
+- "Fiber tuning" tab: complete OAMC pipeline for fiber
+  generation/optimization (bearing load, optional mold, least-squares
+  optimization with iterations, LPP load paths, RDP/outlier
+  post-processing, fiber and convergence CSV export), reused from the
+  standalone OAMC tuner, in a dedicated page of the slicer.
